@@ -10,7 +10,6 @@ It runs a 3-agent product team:
 - `UXUIDesigner` (UI/UX specification, read-only)
 - `Developer` (the only code-writing agent)
 
-The interface is themed as **MIRAGE** (Jordanian military palette + aviation styling), but the core is a practical autonomous coding workflow.
 
 ---
 
