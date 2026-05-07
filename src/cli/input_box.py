@@ -15,6 +15,7 @@ from prompt_toolkit.layout.controls import BufferControl, FormattedTextControl
 from prompt_toolkit.layout.dimension import Dimension as D
 from prompt_toolkit.layout.layout import Layout
 from prompt_toolkit.layout.processors import BeforeInput
+from prompt_toolkit.patch_stdout import patch_stdout
 from prompt_toolkit.styles import Style as PTStyle
 from prompt_toolkit.widgets import Frame
 
@@ -129,6 +130,8 @@ def _prompt_input_box(thread_id: str, model: str, provider: str | None = None) -
     )
 
     try:
-        return app.run()
+        # Allow background worker logs to render while the input box is active.
+        with patch_stdout(raw=True):
+            return app.run()
     except (KeyboardInterrupt, EOFError):
         return None

@@ -6,7 +6,9 @@ Two sortie types:
 """
 from __future__ import annotations
 
+import queue
 import sys
+import threading
 
 import typer
 from rich.prompt import Confirm
@@ -235,36 +237,73 @@ def _start_chat(
     state = session.get_state()
     print_welcome(state.thread_id, state.model, provider=state.provider)
 
-    while True:
-        state = session.get_state()
-        try:
-            user_input = _prompt_input_box(
-                state.thread_id,
-                state.model,
-                provider=state.provider,
-            )
-        except KeyboardInterrupt:
-            print_status("goodbye", "info")
-            break
+    task_queue: queue.Queue[str | None] = queue.Queue()
+    stop_worker = threading.Event()
 
-        if user_input is None:
-            print_status("goodbye", "info")
-            break
+    def _worker_loop() -> None:
+        while not stop_worker.is_set():
+            item = task_queue.get()
+            if item is None:
+                task_queue.task_done()
+                break
+            try:
+                print_status("[WORKING] Mirage agents are running...", "working")
+                current_state = session.get_state()
+                run_agent(
+                    current_state.graph,
+                    item,
+                    current_state.thread_id,
+                    session=session,
+                )
+            except KeyboardInterrupt:
+                print_status("interrupted", "warn")
+            except Exception as e:  # noqa: BLE001
+                print_status(f"error: {e}", "error")
+            finally:
+                print_status("[IDLE] Mirage agents finished.", "idle")
+                task_queue.task_done()
 
-        user_input = user_input.strip()
-        if not user_input:
-            continue
+    worker_thread = threading.Thread(
+        target=_worker_loop,
+        name="mirage-agent-worker",
+        daemon=True,
+    )
+    worker_thread.start()
 
-        if handle_slash_command(user_input, session):
-            continue
-
-        try:
+    try:
+        while True:
             state = session.get_state()
-            run_agent(state.graph, user_input, state.thread_id, session=session)
-        except KeyboardInterrupt:
-            print_status("interrupted", "warn")
-        except Exception as e:  # noqa: BLE001 — surface every error to the user
-            print_status(f"error: {e}", "error")
+            try:
+                user_input = _prompt_input_box(
+                    state.thread_id,
+                    state.model,
+                    provider=state.provider,
+                )
+            except KeyboardInterrupt:
+                print_status("goodbye", "info")
+                break
+
+            if user_input is None:
+                print_status("goodbye", "info")
+                break
+
+            user_input = user_input.strip()
+            if not user_input:
+                continue
+
+            if handle_slash_command(user_input, session):
+                continue
+
+            task_queue.put(user_input)
+            pending = task_queue.qsize()
+            if pending > 1:
+                print_status(f"[queued] task accepted ({pending} pending)", "event")
+            else:
+                print_status("[queued] task accepted", "event")
+    finally:
+        stop_worker.set()
+        task_queue.put(None)
+        worker_thread.join(timeout=2.0)
 
 
 @app.callback(invoke_without_command=True)

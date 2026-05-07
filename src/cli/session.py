@@ -7,7 +7,6 @@ import sys
 from dataclasses import replace
 
 from langchain_core.messages import HumanMessage
-from rich.text import Text
 
 from ..agents.graph import build_graph
 from ..config import RECURSION_LIMIT
@@ -15,7 +14,6 @@ from ..config_store import load_config, parse_model_arg, resolve_api_key
 from ..llm.catalog import PROVIDERS
 from ..llm.spec import LLMSpec
 from ..sessions.store import SessionStore, new_thread_id, resolve_session_selector
-from ..theme import ACCENT, console
 from .model_form import run_model_form
 from .runtime_state import RuntimeSessionState, RuntimeSessionStore
 from .render import (
@@ -510,73 +508,63 @@ def run_agent(
     handoff themselves — there is no human-in-the-loop gate.
     """
     config = {"configurable": {"thread_id": thread_id}, "recursion_limit": RECURSION_LIMIT}
-    print_status("[WORKING] Mirage agents are running...", "working")
-
-    spinner = console.status(
-        Text("thinking…", style=f"italic {ACCENT}"),
-        spinner="dots",
-        spinner_style=ACCENT,
-    )
-    spinner.start()
-    spinner_running = True
     last_sig: tuple[str, str] | None = None
     stagnant_repeats = 0
     seen_live_events: set[str] = set()
     seen_message_keys: set[str] = set()
     pending_tool_calls: dict[str, tuple[str, str | None]] = {}
 
-    try:
-        for mode, event in _iter_live_stream_events(
-            graph,
-            {"messages": [HumanMessage(content=task)]},
-            config,
-        ):
-            if spinner_running:
-                spinner.stop()
-                spinner_running = False
-
-            if mode == "updates" and isinstance(event, dict):
-                for node_name, node_state in event.items():
-                    if node_name == "supervisor":
-                        proposed = (
-                            node_state.get("next", "UNKNOWN")
-                            if isinstance(node_state, dict)
-                            else "UNKNOWN"
+    for mode, event in _iter_live_stream_events(
+        graph,
+        {"messages": [HumanMessage(content=task)]},
+        config,
+    ):
+        if mode == "updates" and isinstance(event, dict):
+            for node_name, node_state in event.items():
+                if node_name == "supervisor":
+                    proposed = (
+                        node_state.get("next", "UNKNOWN")
+                        if isinstance(node_state, dict)
+                        else "UNKNOWN"
+                    )
+                    print_supervisor_routing(proposed)
+                elif isinstance(node_state, dict):
+                    msgs = node_state.get("messages")
+                    if isinstance(msgs, list) and msgs:
+                        # Some LangGraph versions surface tool-call details only
+                        # through updates payloads. Emit live events from these too.
+                        _emit_live_message_events(
+                            {"messages": msgs},
+                            seen_message_keys=seen_message_keys,
+                            seen_live_events=seen_live_events,
+                            pending_tool_calls=pending_tool_calls,
                         )
-                        print_supervisor_routing(proposed)
-                    elif isinstance(node_state, dict):
-                        msgs = node_state.get("messages")
-                        if isinstance(msgs, list) and msgs:
-                            content = getattr(msgs[-1], "content", "") or ""
-                            if _is_human_input_request(str(content)):
-                                print_status(
-                                    "[HITL] Agent requested clarification. Waiting for your input...",
-                                    "warn",
-                                )
-                                return
-                            normalized = " ".join(str(content).split()).strip().lower()
-                            sig = (node_name, normalized)
-                            if normalized and sig == last_sig:
-                                stagnant_repeats += 1
-                            else:
-                                stagnant_repeats = 0
-                            last_sig = sig
-                            if stagnant_repeats >= 3:
-                                print_status(
-                                    "auto-stopped: repeated identical agent output (possible loop)",
-                                    "warn",
-                                )
-                                return
-            elif mode == "values":
-                _emit_live_message_events(
-                    event,
-                    seen_message_keys=seen_message_keys,
-                    seen_live_events=seen_live_events,
-                    pending_tool_calls=pending_tool_calls,
-                )
-        if session is not None:
-            session.get_state().session_store.touch(thread_id)
-    finally:
-        if spinner_running:
-            spinner.stop()
-        print_status("[IDLE] Mirage agents finished.", "idle")
+                        content = getattr(msgs[-1], "content", "") or ""
+                        if _is_human_input_request(str(content)):
+                            print_status(
+                                "[HITL] Agent requested clarification. Waiting for your input...",
+                                "warn",
+                            )
+                            return
+                        normalized = " ".join(str(content).split()).strip().lower()
+                        sig = (node_name, normalized)
+                        if normalized and sig == last_sig:
+                            stagnant_repeats += 1
+                        else:
+                            stagnant_repeats = 0
+                        last_sig = sig
+                        if stagnant_repeats >= 3:
+                            print_status(
+                                "auto-stopped: repeated identical agent output (possible loop)",
+                                "warn",
+                            )
+                            return
+        elif mode == "values":
+            _emit_live_message_events(
+                event,
+                seen_message_keys=seen_message_keys,
+                seen_live_events=seen_live_events,
+                pending_tool_calls=pending_tool_calls,
+            )
+    if session is not None:
+        session.get_state().session_store.touch(thread_id)
