@@ -10,6 +10,7 @@ from typing import Any
 
 from dotenv import load_dotenv
 
+from .cli.project_paths import find_project_root
 from .llm.catalog import PROVIDERS
 
 load_dotenv()
@@ -25,6 +26,11 @@ def mirage_dir() -> Path:
 
 
 def config_path() -> Path:
+    env_override = os.getenv("MIRAGE_CONFIG_PATH")
+    if env_override:
+        maybe = Path(env_override).expanduser()
+        if maybe.is_file():
+            return maybe
     return mirage_dir() / "config.json"
 
 
@@ -126,7 +132,48 @@ def load_config() -> MirageConfig:
     for p in PROVIDERS:
         prov.setdefault(p, {"api_key": None, "base_url": None})
 
-    return _blob_to_cfg(blob)
+    cfg = _blob_to_cfg(blob)
+    _apply_mirage_inline_overrides(cfg)
+    _apply_mirage_project_defaults(cfg)
+    return cfg
+
+
+def _apply_mirage_project_defaults(cfg: MirageConfig) -> None:
+    """Apply lightweight project-level defaults from ``mirage.json`` when present."""
+    project_file = find_project_root() / "mirage.json"
+    if not project_file.is_file():
+        return
+    try:
+        raw = json.loads(project_file.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return
+    model = str(raw.get("model") or "").strip()
+    if "/" in model:
+        prov, _, mdl = model.partition("/")
+        prov = prov.strip().lower()
+        mdl = mdl.strip()
+        if prov in PROVIDERS and mdl:
+            cfg.default_provider = prov
+            cfg.default_model = mdl
+
+
+def _apply_mirage_inline_overrides(cfg: MirageConfig) -> None:
+    """Apply MIRAGE_CONFIG_CONTENT model/provider hints when available."""
+    raw = os.getenv("MIRAGE_CONFIG_CONTENT")
+    if not raw:
+        return
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError:
+        return
+    model = str(data.get("model") or "").strip()
+    if "/" in model:
+        prov, _, mdl = model.partition("/")
+        prov = prov.strip().lower()
+        mdl = mdl.strip()
+        if prov in PROVIDERS and mdl:
+            cfg.default_provider = prov
+            cfg.default_model = mdl
 
 
 def _blob_to_cfg(blob: dict[str, Any]) -> MirageConfig:

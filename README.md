@@ -21,12 +21,34 @@ It runs a 3-agent product team:
 - Thread-aware **persisted** memory (SQLite checkpointer under `~/.mirage/sessions.db`)
 - Multi-provider models (**OpenAI**, **Anthropic**, **Google Gemini**) via LangChain `init_chat_model`
 - Terminal **model form** for API key + base URL when configuring `/model`
+- Runtime modes with policy gates (`build` = allow, `plan` = ask-before `edit`/`bash`)
 - Session index (`~/.mirage/sessions.json`) — list, switch, rename, delete sessions from chat or CLI
 - Slash commands for session + model control (`/help`, `/sessions`, `/session`, `/model`, …)
 - Deduplicated Claude-style core toolset for filesystem, shell, search, git, web, notebook, and MCP descriptor discovery
+- Auto project scaffold creation for `.mirage/agents` and `.mirage/commands` when running Mirage in a project
 - Installable package with console scripts:
   - `mirage`
   - `mirage-cli`
+
+## Mirage compatibility mode
+
+Mirage now includes a unified compatibility surface so teams can adopt Mirage with familiar workflows.
+
+- Command aliases and parity-style commands:
+  - `mirage session ...` (alias for `sessions`)
+  - `mirage auth login|list|logout`
+  - `mirage mcp list|auth|logout|debug`
+  - `mirage export`, `mirage import`, `mirage stats`
+  - `mirage serve`, `mirage web`, `mirage attach`
+- `run` supports parity flags such as `--session`, `--continue`, `--fork`, `--file`, `--format`, `--title`, `--agent`, and `--attach`.
+- Slash command parity additions:
+  - `/undo`, `/redo`, `/compact`, `/summarize`, `/details`, `/thinking`, `/themes`, `/editor`, `/export`, `/share`, `/unshare`, `/mode`, `/agent`
+- Project compatibility files:
+  - `mirage.json` model defaults are read for provider/model hints.
+  - `.mirage/commands/*.md` and `.mirage/agents/*.md` are supported.
+  - custom command frontmatter (`agent`, `model`, `subtask`) is honored at runtime.
+
+Detailed command mapping is documented in `docs/mirage_parity_matrix.md`.
 
 ## State Architecture
 
@@ -246,6 +268,17 @@ Options:
 - `--model`, `-m`
 - `--provider`, `-p`
 
+Extended compatibility flags:
+
+- `--continue`, `-c` — continue most recent saved session
+- `--session`, `-s` — run against a specific session id
+- `--fork` — create a new thread id before running
+- `--file`, `-f` — attach one or more file paths as prompt context
+- `--format` — output format (`default` or `json`)
+- `--title` — create/update session title metadata
+- `--agent` — runtime mode/profile hint (for example `build` or `plan`)
+- `--attach` — compatibility flag for remote-style execution flow
+
 ### Terminal commands (outside chat)
 
 ```bash
@@ -261,6 +294,171 @@ mirage sessions new [name]
 mirage sessions delete <thread-id-or-index>
 ```
 
+## Command reference
+
+This section explains every CLI command currently supported by Mirage.
+
+### `mirage` / `mirage chat`
+
+Start interactive TUI chat mode.
+
+- Purpose: conversational coding session with slash commands and persistent thread memory.
+- Common flags:
+  - `--thread-id`, `-t`
+  - `--session-id`, `-s`
+  - `--provider`, `-p`
+  - `--model`, `-m`
+
+Examples:
+
+```bash
+mirage
+mirage chat --provider openai --model gpt-4.1-mini
+mirage chat --session-id session-a1b2c3d4
+```
+
+### `mirage run`
+
+Run a single prompt non-interactively.
+
+Examples:
+
+```bash
+mirage run "summarize this repo"
+mirage run --continue "continue previous task"
+mirage run --session session-a1b2c3d4 --format json "generate changelog"
+```
+
+### `mirage models`
+
+List curated model ids.
+
+Subcommands and forms:
+
+- `mirage models`
+- `mirage models <provider>`
+- `mirage models list --provider <provider>`
+
+Examples:
+
+```bash
+mirage models
+mirage models anthropic
+mirage models list --provider google
+```
+
+### `mirage config`
+
+Manage stored provider credentials/defaults.
+
+- `mirage config show`
+- `mirage config set-key <provider> <api-key>`
+- `mirage config set-url <provider> <url>`
+- `mirage config set-default <provider> <model-id>`
+
+Example:
+
+```bash
+mirage config set-key openai sk-...
+mirage config set-default openai gpt-4.1-mini
+```
+
+### `mirage sessions` / `mirage session`
+
+Manage saved sessions (`session` is an alias of `sessions`).
+
+- `list`
+- `new [name]`
+- `delete <thread-id-or-index>`
+
+Examples:
+
+```bash
+mirage sessions list
+mirage session new "Refactor pass"
+mirage sessions delete 1
+```
+
+### `mirage auth`
+
+Credential-centric provider commands.
+
+- `mirage auth login --provider <provider> --key <api-key>`
+- `mirage auth list` (alias: `mirage auth ls`)
+- `mirage auth logout <provider>`
+
+### `mirage mcp`
+
+MCP compatibility command group.
+
+- `mirage mcp list` (alias: `ls`)
+- `mirage mcp auth [name]`
+- `mirage mcp logout <name>`
+- `mirage mcp debug <name>`
+
+### `mirage export`
+
+Export session metadata (JSON) to the current project directory.
+
+Examples:
+
+```bash
+mirage export
+mirage export session-a1b2c3d4
+```
+
+### `mirage import`
+
+Import session metadata from JSON.
+
+Example:
+
+```bash
+mirage import .\mirage-session-session-a1b2c3d4.json
+```
+
+### `mirage stats`
+
+Print local session usage summary by provider.
+
+Example:
+
+```bash
+mirage stats --days 7
+```
+
+### `mirage serve`
+
+Run Mirage as a minimal headless HTTP service.
+
+See detailed docs: [Serve command guide](docs/serve.md).
+
+Quick example:
+
+```bash
+mirage serve --hostname 127.0.0.1 --port 4096
+```
+
+### `mirage web`
+
+Start the same headless server as `serve` and open a browser to a health endpoint.
+
+Example:
+
+```bash
+mirage web --port 4096
+```
+
+### `mirage attach`
+
+Attach-compatibility command that currently opens local chat while recording target URL intent.
+
+Example:
+
+```bash
+mirage attach http://localhost:4096
+```
+
 ---
 
 ## Slash commands (inside chat)
@@ -274,11 +472,13 @@ mirage sessions delete <thread-id-or-index>
 - `/delete <id|#>` — delete session metadata + SQLite checkpoints for that thread
 - `/thread [id]` — show or set raw thread id (advanced)
 - `/model [name]` — open **model form** (`provider:model` or bare model id)
+- `/mode <build|plan>` — switch runtime permission mode
+- `/agent <name>` — switch built-in/custom agent profile
 - `/provider [name]` — same form, pre-select provider
 - `/config` — read-only configuration panels (masked keys)
 - `/config edit` — open the model form pre-filled
 - `/models [provider]` — print curated model ids
-- `/exit`, `/quit` — exit
+- `/exit`, `/quit`, `/q` — exit
 
 ---
 
@@ -301,6 +501,8 @@ On first run, Mirage may copy API keys from the environment into `config.json` s
 - `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `GOOGLE_API_KEY` / `GEMINI_API_KEY` — used when not overridden in `config.json`
 - `MIRAGE_CLI_MODEL` — seed default model when creating `config.json`
 - `MIRAGE_CLI_RECURSION_LIMIT` — LangGraph recursion limit (default `75`)
+- `MIRAGE_CONFIG_PATH` — override the user config file path
+- `MIRAGE_CONFIG_CONTENT` — inline JSON overrides (supports `model: \"provider/model\"`)
 
 PowerShell example:
 

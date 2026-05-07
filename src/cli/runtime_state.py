@@ -17,6 +17,8 @@ class RuntimeSessionState:
     model: str
     session_name: str
     session_store: SessionStore
+    mode: str
+    permission_policy: dict[str, str]
     cfg: object
     graph: object
 
@@ -37,6 +39,8 @@ def validate_runtime_state(state: RuntimeSessionState) -> None:
         raise ValueError("model must be non-empty")
     if not state.session_name.strip():
         raise ValueError("session_name must be non-empty")
+    if not state.mode.strip():
+        raise ValueError("mode must be non-empty")
 
 
 class RuntimeSessionStore:
@@ -89,6 +93,8 @@ def with_state(
     model: str | None = None,
     session_name: str | None = None,
     session_store: SessionStore | None = None,
+    mode: str | None = None,
+    permission_policy: dict[str, str] | None = None,
     cfg: object | None = None,
     graph: object | None = None,
 ) -> RuntimeSessionState:
@@ -100,6 +106,10 @@ def with_state(
         model=model if model is not None else state.model,
         session_name=session_name if session_name is not None else state.session_name,
         session_store=session_store if session_store is not None else state.session_store,
+        mode=mode if mode is not None else state.mode,
+        permission_policy=(
+            permission_policy if permission_policy is not None else state.permission_policy
+        ),
         cfg=cfg if cfg is not None else state.cfg,
         graph=graph if graph is not None else state.graph,
     )

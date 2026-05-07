@@ -4,6 +4,7 @@ import unittest
 from dataclasses import replace
 
 from src.cli.runtime_state import RuntimeSessionState, RuntimeSessionStore
+from src.cli.modes import BUILD_MODE, policy_for_mode
 from src.sessions.store import SessionStore
 
 
@@ -15,6 +16,8 @@ class RuntimeSessionStoreTests(unittest.TestCase):
             model="gpt-4.1-mini",
             session_name="session-a1",
             session_store=SessionStore(),
+            mode=BUILD_MODE,
+            permission_policy=policy_for_mode(BUILD_MODE),
             cfg=object(),
             graph=object(),
         )

@@ -12,6 +12,8 @@ from pathlib import Path
 
 from langchain_core.tools import tool
 
+from ..cli.policy import can_execute
+
 
 def _workspace_root() -> Path:
     env_root = os.getenv("MIRAGE_WORKSPACE_ROOT")
@@ -56,6 +58,9 @@ def write_file(filepath: str, content: str) -> str:
     """Writes content to a new file. Automatically creates parent directories.
     DO NOT use this tool to update existing files; use edit_file instead."""
     try:
+        allowed, reason = can_execute("edit", f"write_file:{filepath}")
+        if not allowed:
+            return reason or "Error: write not allowed."
         path = _resolve_safe(filepath)
         path_str = str(path)
         if os.path.isdir(path) or path_str.endswith("/") or path_str.endswith("\\"):
@@ -93,6 +98,9 @@ def edit_file(filepath: str, target_string: str, replacement_string: str) -> str
     Use this instead of write_file for modifying existing code.
     """
     try:
+        allowed, reason = can_execute("edit", f"edit_file:{filepath}")
+        if not allowed:
+            return reason or "Error: edit not allowed."
         path = _resolve_safe(filepath)
         if not os.path.exists(path):
             return f"Error: File '{filepath}' does not exist. Use write_file to create it."

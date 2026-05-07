@@ -5,11 +5,16 @@ import subprocess
 
 from langchain_core.tools import tool
 
+from ..cli.policy import can_execute
+
 
 @tool
 def run_shell_command(command: str, timeout_seconds: int = 30) -> str:
     """Run a shell command and return stdout/stderr with exit code."""
     try:
+        allowed, reason = can_execute("bash", command)
+        if not allowed:
+            return reason or "Error: shell execution not allowed."
         completed = subprocess.run(
             command,
             shell=True,

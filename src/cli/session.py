@@ -4,7 +4,10 @@ from __future__ import annotations
 import os
 import re
 import sys
+import tempfile
+from pathlib import Path
 from dataclasses import replace
+from datetime import datetime, timezone
 
 from langchain_core.messages import HumanMessage
 
@@ -15,6 +18,11 @@ from ..llm.catalog import PROVIDERS
 from ..llm.spec import LLMSpec
 from ..sessions.store import SessionStore, new_thread_id, resolve_session_selector
 from .model_form import run_model_form
+from .edit_history import EditTransaction, FileSnapshot, record_transaction, redo_last, undo_last
+from .mirage_compat import apply_command_template, load_custom_agents, load_custom_commands
+from .modes import BUILD_MODE, PLAN_MODE, policy_for_mode
+from .policy import get_policy, set_policy
+from .project_paths import find_project_root
 from .runtime_state import RuntimeSessionState, RuntimeSessionStore
 from .render import (
     print_agent_message,
@@ -43,6 +51,10 @@ _HITL_HINT_PATTERNS: tuple[re.Pattern[str], ...] = (
     re.compile(r"\bshould (?:it|we|i)\b", re.IGNORECASE),
     re.compile(r"\bonce you provide\b", re.IGNORECASE),
 )
+
+_DETAILS_VISIBLE = True
+_THINKING_VISIBLE = False
+_SHARED_SESSIONS: set[str] = set()
 
 
 def _classify_tool_action(tool_name: str) -> str:
@@ -250,12 +262,15 @@ def create_runtime_session_store(
     session_name: str | None = None,
 ) -> RuntimeSessionStore:
     cfg, graph = _build_session_graph(provider, model)
+    mode = BUILD_MODE
     initial = RuntimeSessionState(
         thread_id=thread_id,
         provider=provider,
         model=model,
         session_name=(session_name or thread_id).strip() or thread_id,
         session_store=session_store,
+        mode=mode,
+        permission_policy=policy_for_mode(mode),
         cfg=cfg,
         graph=graph,
     )
@@ -343,12 +358,33 @@ def handle_slash_command(raw: str, session: RuntimeSessionStore) -> bool:
     cmd = parts[0].lower()
     arg = parts[1].strip() if len(parts) > 1 else None
 
-    if cmd in ("/exit", "/quit"):
+    if cmd in ("/exit", "/quit", "/q"):
         print_status("goodbye", "info")
         sys.exit(0)
 
     if cmd == "/help":
         show_help()
+        return True
+
+    if cmd == "/connect":
+        # Mirage equivalent for provider onboarding: open model+credentials form.
+        open_model_configuration(session)
+        return True
+
+    if cmd == "/init":
+        agents_path = find_project_root() / "AGENTS.md"
+        if agents_path.exists():
+            print_status("AGENTS.md already exists", "info")
+        else:
+            agents_path.write_text(
+                "# AGENTS\n\n"
+                "Project-level instructions for Mirage agents.\n\n"
+                "- Add coding standards\n"
+                "- Add review requirements\n"
+                "- Add domain constraints\n",
+                encoding="utf-8",
+            )
+            print_status(f"✓ created {agents_path}", "success")
         return True
 
     if cmd == "/clear":
@@ -358,6 +394,98 @@ def handle_slash_command(raw: str, session: RuntimeSessionStore) -> bool:
             state.model,
             provider=state.provider,
         )
+        return True
+
+    if cmd in ("/undo", "/redo"):
+        if cmd == "/undo":
+            count = undo_last(state.thread_id)
+            if count:
+                print_status(f"✓ undo restored {count} file(s)", "success")
+            else:
+                print_status("nothing to undo", "warn")
+        else:
+            count = redo_last(state.thread_id)
+            if count:
+                print_status(f"✓ redo restored {count} file(s)", "success")
+            else:
+                print_status("nothing to redo", "warn")
+        return True
+
+    if cmd in ("/compact", "/summarize"):
+        compact_dir = find_project_root() / ".mirage" / "compactions"
+        compact_dir.mkdir(parents=True, exist_ok=True)
+        stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+        out = compact_dir / f"{state.thread_id}-{stamp}.md"
+        out.write_text(
+            "# Mirage Session Compaction\n\n"
+            f"- thread: {state.thread_id}\n"
+            f"- provider: {state.provider}\n"
+            f"- model: {state.model}\n"
+            f"- mode: {state.mode}\n"
+            "\nCompaction placeholder: summarize key decisions from this thread.\n",
+            encoding="utf-8",
+        )
+        print_status(f"✓ compacted session marker written to {out}", "success")
+        return True
+
+    if cmd == "/details":
+        global _DETAILS_VISIBLE
+        _DETAILS_VISIBLE = not _DETAILS_VISIBLE
+        print_status(f"tool details: {'on' if _DETAILS_VISIBLE else 'off'}", "info")
+        return True
+
+    if cmd == "/thinking":
+        global _THINKING_VISIBLE
+        _THINKING_VISIBLE = not _THINKING_VISIBLE
+        print_status(f"thinking blocks: {'visible' if _THINKING_VISIBLE else 'hidden'}", "info")
+        return True
+
+    if cmd == "/themes":
+        print_status("available themes: mirage-default", "info")
+        return True
+
+    if cmd == "/editor":
+        editor = os.getenv("EDITOR") or ("notepad" if os.name == "nt" else "nano")
+        with tempfile.NamedTemporaryFile(
+            mode="w+", suffix=".md", delete=False, encoding="utf-8"
+        ) as tmp:
+            tmp_path = Path(tmp.name)
+        try:
+            os.system(f'{editor} "{tmp_path}"')
+            draft = tmp_path.read_text(encoding="utf-8").strip()
+            if draft:
+                print_status("draft ready; submit by sending the edited text manually", "info")
+            else:
+                print_status("editor closed with empty draft", "warn")
+        finally:
+            if tmp_path.exists():
+                tmp_path.unlink()
+        return True
+
+    if cmd == "/export":
+        export_path = find_project_root() / f"mirage-chat-{state.thread_id}.md"
+        export_path.write_text(
+            f"# Mirage Session\n\n- thread: {state.thread_id}\n- provider: {state.provider}\n- model: {state.model}\n",
+            encoding="utf-8",
+        )
+        print_status(f"✓ exported session shell to {export_path}", "success")
+        return True
+
+    if cmd == "/share":
+        _SHARED_SESSIONS.add(state.thread_id)
+        share_dir = find_project_root() / ".mirage" / "shares"
+        share_dir.mkdir(parents=True, exist_ok=True)
+        share_file = share_dir / f"{state.thread_id}.share"
+        share_file.write_text(f"mirage://share/{state.thread_id}\n", encoding="utf-8")
+        print_status(f"✓ session shared locally: {share_file}", "success")
+        return True
+
+    if cmd == "/unshare":
+        _SHARED_SESSIONS.discard(state.thread_id)
+        share_file = find_project_root() / ".mirage" / "shares" / f"{state.thread_id}.share"
+        if share_file.exists():
+            share_file.unlink()
+        print_status(f"✓ session unshared locally: {state.thread_id}", "success")
         return True
 
     store = state.session_store
@@ -392,6 +520,60 @@ def handle_slash_command(raw: str, session: RuntimeSessionStore) -> bool:
 
     if cmd == "/model":
         open_model_configuration(session, arg)
+        return True
+
+    if cmd == "/mode":
+        desired = (arg or "").strip().lower()
+        if not desired:
+            print_status(f"current mode: {state.mode}", "info")
+            return True
+        if desired not in {BUILD_MODE, PLAN_MODE}:
+            print_status("usage: /mode <build|plan>", "error")
+            return True
+        session.set_state(
+            lambda prev: replace(
+                prev,
+                mode=desired,
+                permission_policy=policy_for_mode(desired),
+            )
+        )
+        print_status(f"✓ mode set to {desired}", "success")
+        return True
+
+    if cmd == "/agent":
+        if not arg:
+            print_status("usage: /agent <name>", "error")
+            return True
+        name = arg.strip().lower()
+        if name in {BUILD_MODE, PLAN_MODE}:
+            session.set_state(
+                lambda prev: replace(
+                    prev,
+                    mode=name,
+                    permission_policy=policy_for_mode(name),
+                )
+            )
+            print_status(f"✓ active agent mode: {name}", "success")
+            return True
+        agents = load_custom_agents()
+        hit = agents.get(name)
+        if not hit:
+            print_status(f"agent not found: {name}", "error")
+            return True
+        new_mode = (hit.mode or BUILD_MODE).strip().lower()
+        if new_mode not in {BUILD_MODE, PLAN_MODE}:
+            new_mode = BUILD_MODE
+        session.set_state(
+            lambda prev: replace(
+                prev,
+                mode=new_mode,
+                permission_policy=policy_for_mode(new_mode),
+                model=(hit.model.split("/", 1)[1] if hit.model and "/" in hit.model else prev.model),
+                provider=(hit.model.split("/", 1)[0] if hit.model and "/" in hit.model else prev.provider),
+                graph=None,
+            )
+        )
+        print_status(f"✓ selected agent {name} (mode={new_mode})", "success")
         return True
 
     if cmd == "/provider":
@@ -436,7 +618,7 @@ def handle_slash_command(raw: str, session: RuntimeSessionStore) -> bool:
         print_models_table(prov)
         return True
 
-    if cmd == "/sessions":
+    if cmd in ("/sessions", "/resume", "/continue"):
         rows = store.list_sessions()
         print_sessions_table(rows, active_id=state.thread_id)
         return True
@@ -494,6 +676,50 @@ def handle_slash_command(raw: str, session: RuntimeSessionStore) -> bool:
             print_status(f"started fresh thread {new_tid}", "info")
         return True
 
+    custom_cmd = cmd.lstrip("/")
+    loaded = load_custom_commands()
+    if custom_cmd in loaded:
+        template = loaded[custom_cmd]
+        expanded = apply_command_template(template.template, arg or "")
+        print_status(f"running custom command /{custom_cmd}", "event")
+        current_state = session.get_state()
+        target_graph = current_state.graph
+        target_provider = current_state.provider
+        target_model = current_state.model
+        target_policy = current_state.permission_policy
+        if template.agent:
+            desired_mode = template.agent.strip().lower()
+            if desired_mode in {BUILD_MODE, PLAN_MODE}:
+                target_policy = policy_for_mode(desired_mode)
+        if template.model:
+            raw = template.model.strip()
+            if "/" in raw:
+                target_provider, _, target_model = raw.partition("/")
+            else:
+                target_model = raw
+            _, target_graph = _build_session_graph(target_provider, target_model)
+        target_thread = new_thread_id() if template.subtask else current_state.thread_id
+        run_agent(
+            target_graph,
+            expanded,
+            target_thread,
+            session=session,
+            execution_policy=target_policy,
+        )
+        return True
+
+    if cmd == "/agents":
+        agents = load_custom_agents()
+        if not agents:
+            print_status("no custom agents found in .mirage/agents", "info")
+            return True
+        for name, data in agents.items():
+            print_status(
+                f"{name}: mode={data.mode or 'all'} model={data.model or '(default)'} permission={data.permission or '(mode default)'}",
+                "info",
+            )
+        return True
+
     print_status(f"unknown command: {cmd}  (try /help)", "error")
     return True
 
@@ -503,68 +729,113 @@ def run_agent(
     task: str,
     thread_id: str,
     session: RuntimeSessionStore | None = None,
+    execution_policy: dict[str, str] | None = None,
 ) -> None:
     """Stream the multi-agent workflow autonomously. Agents decide every
     handoff themselves — there is no human-in-the-loop gate.
     """
     config = {"configurable": {"thread_id": thread_id}, "recursion_limit": RECURSION_LIMIT}
+    previous_policy = get_policy()
+    if execution_policy is not None:
+        set_policy(execution_policy)
+    elif session is not None:
+        set_policy(session.get_state().permission_policy)
     last_sig: tuple[str, str] | None = None
     stagnant_repeats = 0
     seen_live_events: set[str] = set()
     seen_message_keys: set[str] = set()
     pending_tool_calls: dict[str, tuple[str, str | None]] = {}
+    touched_files_before: dict[str, tuple[bool, str]] = {}
 
-    for mode, event in _iter_live_stream_events(
-        graph,
-        {"messages": [HumanMessage(content=task)]},
-        config,
-    ):
-        if mode == "updates" and isinstance(event, dict):
-            for node_name, node_state in event.items():
-                if node_name == "supervisor":
-                    proposed = (
-                        node_state.get("next", "UNKNOWN")
-                        if isinstance(node_state, dict)
-                        else "UNKNOWN"
-                    )
-                    print_supervisor_routing(proposed)
-                elif isinstance(node_state, dict):
-                    msgs = node_state.get("messages")
-                    if isinstance(msgs, list) and msgs:
-                        # Some LangGraph versions surface tool-call details only
-                        # through updates payloads. Emit live events from these too.
-                        _emit_live_message_events(
-                            {"messages": msgs},
-                            seen_message_keys=seen_message_keys,
-                            seen_live_events=seen_live_events,
-                            pending_tool_calls=pending_tool_calls,
+    try:
+        for mode, event in _iter_live_stream_events(
+            graph,
+            {"messages": [HumanMessage(content=task)]},
+            config,
+        ):
+            if mode == "updates" and isinstance(event, dict):
+                for node_name, node_state in event.items():
+                    if node_name == "supervisor":
+                        proposed = (
+                            node_state.get("next", "UNKNOWN")
+                            if isinstance(node_state, dict)
+                            else "UNKNOWN"
                         )
-                        content = getattr(msgs[-1], "content", "") or ""
-                        if _is_human_input_request(str(content)):
-                            print_status(
-                                "[HITL] Agent requested clarification. Waiting for your input...",
-                                "warn",
+                        print_supervisor_routing(proposed)
+                    elif isinstance(node_state, dict):
+                        msgs = node_state.get("messages")
+                        if isinstance(msgs, list) and msgs:
+                            # Some LangGraph versions surface tool-call details only
+                            # through updates payloads. Emit live events from these too.
+                            _emit_live_message_events(
+                                {"messages": msgs},
+                                seen_message_keys=seen_message_keys,
+                                seen_live_events=seen_live_events,
+                                pending_tool_calls=pending_tool_calls,
                             )
-                            return
-                        normalized = " ".join(str(content).split()).strip().lower()
-                        sig = (node_name, normalized)
-                        if normalized and sig == last_sig:
-                            stagnant_repeats += 1
-                        else:
-                            stagnant_repeats = 0
-                        last_sig = sig
-                        if stagnant_repeats >= 3:
-                            print_status(
-                                "auto-stopped: repeated identical agent output (possible loop)",
-                                "warn",
-                            )
-                            return
-        elif mode == "values":
-            _emit_live_message_events(
-                event,
-                seen_message_keys=seen_message_keys,
-                seen_live_events=seen_live_events,
-                pending_tool_calls=pending_tool_calls,
-            )
+                            content = getattr(msgs[-1], "content", "") or ""
+                            if _is_human_input_request(str(content)):
+                                print_status(
+                                    "[HITL] Agent requested clarification. Waiting for your input...",
+                                    "warn",
+                                )
+                                return
+                            normalized = " ".join(str(content).split()).strip().lower()
+                            sig = (node_name, normalized)
+                            if normalized and sig == last_sig:
+                                stagnant_repeats += 1
+                            else:
+                                stagnant_repeats = 0
+                            last_sig = sig
+                            if stagnant_repeats >= 3:
+                                print_status(
+                                    "auto-stopped: repeated identical agent output (possible loop)",
+                                    "warn",
+                                )
+                                return
+            elif mode == "values":
+                _emit_live_message_events(
+                    event,
+                    seen_message_keys=seen_message_keys,
+                    seen_live_events=seen_live_events,
+                    pending_tool_calls=pending_tool_calls,
+                )
+                if isinstance(event, dict):
+                    messages = event.get("messages")
+                    if isinstance(messages, list):
+                        for msg in messages:
+                            if str(getattr(msg, "type", "")).lower() == "tool":
+                                written = _extract_written_file(str(getattr(msg, "content", "") or ""))
+                                if written and written not in touched_files_before:
+                                    p = Path(written)
+                                    if p.exists():
+                                        touched_files_before[written] = (
+                                            True,
+                                            p.read_text(encoding="utf-8"),
+                                        )
+                                    else:
+                                        touched_files_before[written] = (False, "")
+    finally:
+        set_policy(previous_policy)
     if session is not None:
         session.get_state().session_store.touch(thread_id)
+    if touched_files_before:
+        snapshots: list[FileSnapshot] = []
+        for path, (before_exists, before_content) in touched_files_before.items():
+            p = Path(path)
+            if p.exists():
+                after_exists = True
+                after_content = p.read_text(encoding="utf-8")
+            else:
+                after_exists = False
+                after_content = ""
+            snapshots.append(
+                FileSnapshot(
+                    path=path,
+                    before_exists=before_exists,
+                    before_content=before_content,
+                    after_exists=after_exists,
+                    after_content=after_content,
+                )
+            )
+        record_transaction(thread_id, EditTransaction(files=snapshots))
