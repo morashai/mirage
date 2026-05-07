@@ -22,9 +22,11 @@ from ..config_store import (
     load_config,
     parse_model_arg,
     resolve_api_key,
+    resolve_base_url,
     save_mcp_server,
 )
 from ..llm.catalog import PROVIDERS
+from ..llm.factory import make_llm
 from ..llm.spec import LLMSpec
 from ..sessions.store import SessionStore, new_thread_id, resolve_session_selector
 from .model_form import run_model_form
@@ -89,6 +91,10 @@ def _parse_flag_map(arg: str | None) -> tuple[list[str], dict[str, list[str]]]:
     return positionals, flags
 
 
+def _live_stamp() -> str:
+    return datetime.now().strftime("%H:%M:%S")
+
+
 def _detect_project_stack(root: Path) -> str:
     if (root / "pyproject.toml").is_file() or (root / "requirements.txt").is_file():
         return "Python"
@@ -127,6 +133,221 @@ def _init_agents_md(root: Path) -> tuple[Path, str]:
     )
     target.write_text(seed, encoding="utf-8")
     return target, "created"
+
+
+def _safe_slug(value: str) -> str:
+    cleaned = re.sub(r"[^a-zA-Z0-9._-]+", "-", value.strip()).strip("-").lower()
+    return cleaned or "untitled"
+
+
+def _project_context_snapshot(root: Path) -> str:
+    top_entries = sorted(root.iterdir(), key=lambda p: p.name.lower())
+    top_names = [p.name for p in top_entries[:24]]
+    stack = _detect_project_stack(root)
+    return (
+        f"Project: {root.name}\n"
+        f"Stack: {stack}\n"
+        f"Top-level entries: {', '.join(top_names)}\n"
+    )
+
+
+def _llm_markdown_draft(
+    *,
+    provider: str,
+    model: str,
+    prompt: str,
+) -> str:
+    cfg = load_config()
+    api_key = resolve_api_key(cfg, provider)
+    base_url = resolve_base_url(cfg, provider)
+    llm = make_llm(provider, model, api_key=api_key, base_url=base_url)
+    msg = llm.invoke(prompt)
+    content = getattr(msg, "content", "")
+    if isinstance(content, str):
+        return content.strip()
+    if isinstance(content, list):
+        parts: list[str] = []
+        for item in content:
+            if isinstance(item, dict):
+                text = item.get("text")
+                if isinstance(text, str) and text.strip():
+                    parts.append(text.strip())
+            elif isinstance(item, str) and item.strip():
+                parts.append(item.strip())
+        return "\n\n".join(parts).strip()
+    return str(content).strip()
+
+
+def _create_project_spec(root: Path, title: str, *, provider: str, model: str) -> Path:
+    specs_dir = root / ".mirage" / "specs"
+    specs_dir.mkdir(parents=True, exist_ok=True)
+    slug = _safe_slug(title)
+    path = specs_dir / f"{slug}.md"
+    if path.exists():
+        stamp = datetime.now(timezone.utc).strftime("%Y%m%d%H%M%S")
+        path = specs_dir / f"{slug}-{stamp}.md"
+    context = _project_context_snapshot(root)
+    try:
+        body = _llm_markdown_draft(
+            provider=provider,
+            model=model,
+            prompt=(
+                "Create a concise, implementation-ready project specification in Markdown.\n"
+                "Use these sections exactly: Title, Goal, Scope, Functional requirements, "
+                "Non-functional requirements, Acceptance criteria, Risks and assumptions.\n"
+                "Prefer concrete details inferred from context and avoid placeholders.\n\n"
+                f"Requested feature: {title}\n\n"
+                f"{context}"
+            ),
+        )
+    except Exception:  # noqa: BLE001
+        body = (
+            f"# Spec\n\n## Title\n{title}\n\n## Goal\n- Define the target outcome.\n\n"
+            "## Scope\n- In scope\n- Out of scope\n\n## Functional requirements\n- TBD\n\n"
+            "## Non-functional requirements\n- TBD\n\n## Acceptance criteria\n- [ ] TBD\n\n"
+            "## Risks and assumptions\n- TBD\n"
+        )
+    path.write_text(body.rstrip() + "\n", encoding="utf-8")
+    return path
+
+
+def _latest_spec_file(root: Path) -> Path | None:
+    specs_dir = root / ".mirage" / "specs"
+    if not specs_dir.is_dir():
+        return None
+    files = [p for p in specs_dir.glob("*.md") if p.is_file()]
+    if not files:
+        return None
+    return max(files, key=lambda p: p.stat().st_mtime)
+
+
+def _latest_plan_file(root: Path) -> Path | None:
+    plans_dir = root / ".mirage" / "plans"
+    if not plans_dir.is_dir():
+        return None
+    files = [p for p in plans_dir.glob("*.md") if p.is_file()]
+    if not files:
+        return None
+    return max(files, key=lambda p: p.stat().st_mtime)
+
+
+def _create_project_plan(
+    root: Path,
+    title: str,
+    *,
+    provider: str,
+    model: str,
+    spec_path: Path,
+) -> Path:
+    plans_dir = root / ".mirage" / "plans"
+    plans_dir.mkdir(parents=True, exist_ok=True)
+    slug = _safe_slug(title)
+    path = plans_dir / f"{slug}.md"
+    if path.exists():
+        stamp = datetime.now(timezone.utc).strftime("%Y%m%d%H%M%S")
+        path = plans_dir / f"{slug}-{stamp}.md"
+    spec_text = spec_path.read_text(encoding="utf-8")
+    context = _project_context_snapshot(root)
+    try:
+        body = _llm_markdown_draft(
+            provider=provider,
+            model=model,
+            prompt=(
+                "Create a spec-driven implementation plan in Markdown from the provided spec.\n"
+                "Use these sections exactly: Title, Milestones, Task breakdown, Validation strategy, Rollback strategy.\n"
+                "Task breakdown must be actionable checkboxes grouped by milestone and file touchpoints.\n"
+                "Do not restate generic advice; anchor tasks to the spec details.\n\n"
+                f"Plan title: {title}\n\n"
+                f"{context}\n"
+                f"Source spec path: {spec_path}\n\n"
+                "Source spec:\n"
+                f"{spec_text}\n"
+            ),
+        )
+    except Exception:  # noqa: BLE001
+        body = (
+            f"# Plan\n\n## Title\n{title}\n\n## Milestones\n1. Implementation\n2. Verification\n\n"
+            "## Task breakdown\n- [ ] Implement per spec\n- [ ] Add tests\n\n"
+            "## Validation strategy\n- Run targeted tests\n\n## Rollback strategy\n- Revert change set\n"
+        )
+    path.write_text(body.rstrip() + "\n", encoding="utf-8")
+    return path
+
+
+def _prepare_spec_driven_task(
+    raw_task: str,
+    *,
+    provider: str,
+    model: str,
+) -> tuple[str, Path, Path]:
+    """Ensure spec+plan exist and return an enriched task prompt."""
+    root = find_project_root()
+    spec_path = _latest_spec_file(root)
+    if spec_path is None:
+        spec_path = _create_project_spec(
+            root,
+            raw_task[:80] or "Project Spec",
+            provider=provider,
+            model=model,
+        )
+
+    plan_path = _latest_plan_file(root)
+    if plan_path is None or plan_path.stat().st_mtime < spec_path.stat().st_mtime:
+        plan_path = _create_project_plan(
+            root,
+            raw_task[:80] or "Project Plan",
+            provider=provider,
+            model=model,
+            spec_path=spec_path,
+        )
+
+    project_context = _project_context_snapshot(root)
+    spec_text = spec_path.read_text(encoding="utf-8").strip()
+    plan_text = plan_path.read_text(encoding="utf-8").strip()
+    enriched = (
+        "Use the following project context and plan as the source of truth.\n"
+        "If implementation details are missing, update the plan first, then execute.\n\n"
+        "## Project context\n"
+        f"{project_context}\n"
+        "## Active spec\n"
+        f"path: {spec_path}\n\n"
+        f"{spec_text}\n\n"
+        "## Active plan\n"
+        f"path: {plan_path}\n\n"
+        f"{plan_text}\n\n"
+        "## User request\n"
+        f"{raw_task}\n"
+    )
+    return enriched, spec_path, plan_path
+
+
+_OPEN_CHECKBOX_RE = re.compile(r"^(\s*[-*]\s+\[ \]\s+)(.+?)\s*$")
+
+
+def _list_open_plan_items(plan_path: Path) -> list[str]:
+    lines = plan_path.read_text(encoding="utf-8").splitlines()
+    items: list[str] = []
+    for line in lines:
+        m = _OPEN_CHECKBOX_RE.match(line)
+        if m:
+            items.append(m.group(2).strip())
+    return items
+
+
+def _mark_plan_item_done(plan_path: Path, item_text: str) -> bool:
+    lines = plan_path.read_text(encoding="utf-8").splitlines()
+    needle = item_text.strip()
+    for i, line in enumerate(lines):
+        m = _OPEN_CHECKBOX_RE.match(line)
+        if not m:
+            continue
+        if m.group(2).strip() != needle:
+            continue
+        prefix = m.group(1).replace("[ ]", "[x]", 1)
+        lines[i] = f"{prefix}{m.group(2).strip()}"
+        plan_path.write_text("\n".join(lines).rstrip() + "\n", encoding="utf-8")
+        return True
+    return False
 
 
 def _classify_tool_action(tool_name: str) -> str:
@@ -252,11 +473,11 @@ def _emit_live_message_events(
                 label = _classify_tool_action(tool_name)
                 if target:
                     print_status(
-                        f"[live] {label}: {tool_name} ({target})",
+                        f"[live {_live_stamp()}] {label}: {tool_name} ({target})",
                         "event",
                     )
                 else:
-                    print_status(f"[live] {label}: {tool_name}", "event")
+                    print_status(f"[live {_live_stamp()}] {label}: {tool_name}", "event")
 
         if msg_type == "tool":
             text = str(content).strip()
@@ -271,14 +492,14 @@ def _emit_live_message_events(
                     else:
                         prefix = f"[live] result <- {tool_name}"
                 else:
-                    prefix = "[live] tool result"
+                    prefix = f"[live {_live_stamp()}] tool result"
                 print_status(f"{prefix}: {preview}", _tool_result_kind(text))
             written_file = _extract_written_file(str(content))
             if written_file:
                 event_key = f"file:{written_file}"
                 if event_key not in seen_live_events:
                     seen_live_events.add(event_key)
-                    print_status(f"[live] file updated: {written_file}", "success")
+                    print_status(f"[live {_live_stamp()}] file updated: {written_file}", "success")
             continue
 
         if msg_type in {"ai", "assistant"}:
@@ -286,6 +507,34 @@ def _emit_live_message_events(
             if str(content).strip():
                 display_name = name if name else "Build"
                 print_agent_message(display_name, str(content))
+
+
+def _seed_seen_message_keys_from_history(
+    graph,
+    config: dict,
+    *,
+    seen_message_keys: set[str],
+) -> None:
+    """Mark existing checkpointed messages as already-seen.
+
+    Without this seed, each new run may replay older thread messages when the
+    graph streams full state snapshots.
+    """
+    try:
+        snapshot = graph.get_state(config)
+        values = getattr(snapshot, "values", None)
+        if not isinstance(values, dict):
+            return
+        messages = values.get("messages")
+        if not isinstance(messages, list):
+            return
+        for index, msg in enumerate(messages):
+            msg_id = getattr(msg, "id", None)
+            message_key = str(msg_id) if msg_id else f"idx:{index}:{type(msg).__name__}"
+            seen_message_keys.add(message_key)
+    except Exception:  # noqa: BLE001
+        # Older LangGraph builds or missing checkpoint state should not block run.
+        return
 
 
 def _build_session_graph(provider: str, model: str):
@@ -451,6 +700,51 @@ def handle_slash_command(raw: str, session: RuntimeSessionStore) -> bool:
             print_status(f"✓ updated {agents_path}", "success")
         else:
             print_status("AGENTS.md already configured", "info")
+        return True
+
+    if cmd == "/spec":
+        title = (arg or "Project Spec").strip() or "Project Spec"
+        spec_path = _create_project_spec(
+            find_project_root(),
+            title,
+            provider=state.provider,
+            model=state.model,
+        )
+        session.set_state(
+            lambda prev: replace(
+                prev,
+                mode=PLAN_MODE,
+                permission_policy=policy_for_mode(PLAN_MODE),
+            )
+        )
+        print_status(f"✓ created spec: {spec_path}", "success")
+        print_status("mode switched to plan", "info")
+        return True
+
+    if cmd == "/plan":
+        title = (arg or "Project Plan").strip() or "Project Plan"
+        root = find_project_root()
+        spec_path = _latest_spec_file(root)
+        if spec_path is None:
+            print_status("no spec found. create one first with /spec <title>", "error")
+            return True
+        plan_path = _create_project_plan(
+            root,
+            title,
+            provider=state.provider,
+            model=state.model,
+            spec_path=spec_path,
+        )
+        session.set_state(
+            lambda prev: replace(
+                prev,
+                mode=PLAN_MODE,
+                permission_policy=policy_for_mode(PLAN_MODE),
+            )
+        )
+        print_status(f"✓ created plan: {plan_path}", "success")
+        print_status(f"source spec: {spec_path}", "info")
+        print_status("mode switched to plan", "info")
         return True
 
     if cmd == "/clear":
@@ -881,80 +1175,135 @@ def run_agent(
     execution_policy: dict[str, str] | None = None,
 ) -> None:
     """Stream the runtime workflow autonomously."""
+    if session is not None:
+        st = session.get_state()
+        try:
+            task, spec_path, plan_path = _prepare_spec_driven_task(
+                task,
+                provider=st.provider,
+                model=st.model,
+            )
+            print_status(f"[spec-driven] using spec: {spec_path}", "info")
+            print_status(f"[spec-driven] using plan: {plan_path}", "info")
+        except Exception as e:  # noqa: BLE001
+            print_status(f"[spec-driven] fallback to raw task ({e})", "warn")
+
     config = {"configurable": {"thread_id": thread_id}, "recursion_limit": RECURSION_LIMIT}
     previous_policy = get_policy()
     if execution_policy is not None:
         set_policy(execution_policy)
     elif session is not None:
         set_policy(session.get_state().permission_policy)
-    last_sig: tuple[str, str] | None = None
-    stagnant_repeats = 0
-    seen_live_events: set[str] = set()
-    seen_message_keys: set[str] = set()
-    pending_tool_calls: dict[str, tuple[str, str | None]] = {}
     touched_files_before: dict[str, tuple[bool, str]] = {}
 
+    plan_path_local = locals().get("plan_path")
+    open_plan_items: list[str] = []
+    if isinstance(plan_path_local, Path) and plan_path_local.is_file():
+        try:
+            open_plan_items = _list_open_plan_items(plan_path_local)
+        except Exception:  # noqa: BLE001
+            open_plan_items = []
+
+    iteration_tasks = [task]
+    if open_plan_items:
+        iteration_tasks = [
+            (
+                f"{task}\n\n"
+                f"## Current plan task ({idx}/{len(open_plan_items)})\n"
+                f"- {item}\n\n"
+                "Complete this task now. Keep changes scoped to this task."
+            )
+            for idx, item in enumerate(open_plan_items, start=1)
+        ]
+        print_status(f"[spec-driven] iterating {len(open_plan_items)} plan tasks", "info")
+
     try:
-        for mode, event in _iter_live_stream_events(
-            graph,
-            {"messages": [HumanMessage(content=task)]},
-            config,
-        ):
-            if mode == "updates" and isinstance(event, dict):
-                for node_name, node_state in event.items():
-                    if isinstance(node_state, dict):
-                        msgs = node_state.get("messages")
-                        if isinstance(msgs, list) and msgs:
-                            # Some LangGraph versions surface tool-call details only
-                            # through updates payloads. Emit live events from these too.
-                            _emit_live_message_events(
-                                {"messages": msgs},
-                                seen_message_keys=seen_message_keys,
-                                seen_live_events=seen_live_events,
-                                pending_tool_calls=pending_tool_calls,
-                            )
-                            content = getattr(msgs[-1], "content", "") or ""
-                            if _is_human_input_request(str(content)):
-                                print_status(
-                                    "[HITL] Agent requested clarification. Waiting for your input...",
-                                    "warn",
+        for task_idx, current_task in enumerate(iteration_tasks):
+            last_sig: tuple[str, str] | None = None
+            stagnant_repeats = 0
+            seen_live_events: set[str] = set()
+            seen_message_keys: set[str] = set()
+            pending_tool_calls: dict[str, tuple[str, str | None]] = {}
+            _seed_seen_message_keys_from_history(
+                graph,
+                config,
+                seen_message_keys=seen_message_keys,
+            )
+            should_stop = False
+            for mode, event in _iter_live_stream_events(
+                graph,
+                {"messages": [HumanMessage(content=current_task)]},
+                config,
+            ):
+                if mode == "updates" and isinstance(event, dict):
+                    for node_name, node_state in event.items():
+                        if isinstance(node_state, dict):
+                            msgs = node_state.get("messages")
+                            if isinstance(msgs, list) and msgs:
+                                _emit_live_message_events(
+                                    {"messages": msgs},
+                                    seen_message_keys=seen_message_keys,
+                                    seen_live_events=seen_live_events,
+                                    pending_tool_calls=pending_tool_calls,
                                 )
-                                return
-                            normalized = " ".join(str(content).split()).strip().lower()
-                            sig = (node_name, normalized)
-                            if normalized and sig == last_sig:
-                                stagnant_repeats += 1
-                            else:
-                                stagnant_repeats = 0
-                            last_sig = sig
-                            if stagnant_repeats >= 3:
-                                print_status(
-                                    "auto-stopped: repeated identical agent output (possible loop)",
-                                    "warn",
-                                )
-                                return
-            elif mode == "values":
-                _emit_live_message_events(
-                    event,
-                    seen_message_keys=seen_message_keys,
-                    seen_live_events=seen_live_events,
-                    pending_tool_calls=pending_tool_calls,
-                )
-                if isinstance(event, dict):
-                    messages = event.get("messages")
-                    if isinstance(messages, list):
-                        for msg in messages:
-                            if str(getattr(msg, "type", "")).lower() == "tool":
-                                written = _extract_written_file(str(getattr(msg, "content", "") or ""))
-                                if written and written not in touched_files_before:
-                                    p = Path(written)
-                                    if p.exists():
-                                        touched_files_before[written] = (
-                                            True,
-                                            p.read_text(encoding="utf-8"),
-                                        )
-                                    else:
-                                        touched_files_before[written] = (False, "")
+                                content = getattr(msgs[-1], "content", "") or ""
+                                if _is_human_input_request(str(content)):
+                                    print_status(
+                                        "[HITL] Agent requested clarification. Waiting for your input...",
+                                        "warn",
+                                    )
+                                    should_stop = True
+                                    break
+                                normalized = " ".join(str(content).split()).strip().lower()
+                                sig = (node_name, normalized)
+                                if normalized and sig == last_sig:
+                                    stagnant_repeats += 1
+                                else:
+                                    stagnant_repeats = 0
+                                last_sig = sig
+                                if stagnant_repeats >= 3:
+                                    print_status(
+                                        "auto-stopped: repeated identical agent output (possible loop)",
+                                        "warn",
+                                    )
+                                    should_stop = True
+                                    break
+                    if should_stop:
+                        break
+                elif mode == "values":
+                    _emit_live_message_events(
+                        event,
+                        seen_message_keys=seen_message_keys,
+                        seen_live_events=seen_live_events,
+                        pending_tool_calls=pending_tool_calls,
+                    )
+                    if isinstance(event, dict):
+                        messages = event.get("messages")
+                        if isinstance(messages, list):
+                            for msg in messages:
+                                if str(getattr(msg, "type", "")).lower() == "tool":
+                                    written = _extract_written_file(str(getattr(msg, "content", "") or ""))
+                                    if written and written not in touched_files_before:
+                                        p = Path(written)
+                                        if p.exists():
+                                            touched_files_before[written] = (
+                                                True,
+                                                p.read_text(encoding="utf-8"),
+                                            )
+                                        else:
+                                            touched_files_before[written] = (False, "")
+
+            if (
+                not should_stop
+                and open_plan_items
+                and isinstance(plan_path_local, Path)
+                and plan_path_local.is_file()
+            ):
+                item = open_plan_items[task_idx]
+                if _mark_plan_item_done(plan_path_local, item):
+                    print_status(f"[spec-driven] marked done: {item}", "success")
+            if should_stop:
+                break
     finally:
         set_policy(previous_policy)
     if session is not None:

@@ -29,6 +29,18 @@ class CustomAgent:
     permission: str | None = None
 
 
+_NULLISH = {"", "null", "none", "~"}
+
+
+def _norm_optional(value: str | None) -> str | None:
+    if value is None:
+        return None
+    clean = value.strip()
+    if clean.lower() in _NULLISH:
+        return None
+    return clean
+
+
 def _parse_frontmatter(markdown: str) -> tuple[dict[str, str], str]:
     text = markdown.strip()
     if not text.startswith("---"):
@@ -61,8 +73,8 @@ def load_custom_commands(root: Path | None = None) -> dict[str, CustomCommand]:
                 name=name,
                 description=front.get("description", ""),
                 template=body.strip(),
-                agent=front.get("agent"),
-                model=front.get("model"),
+                agent=_norm_optional(front.get("agent")),
+                model=_norm_optional(front.get("model")),
                 subtask=front.get("subtask", "").strip().lower() in {"true", "1", "yes", "on"},
             )
     return commands
@@ -89,10 +101,10 @@ def load_custom_agents(root: Path | None = None) -> dict[str, CustomAgent]:
         agents[name] = CustomAgent(
             name=name,
             description=front.get("description", ""),
-            mode=front.get("mode"),
-            model=front.get("model"),
+            mode=_norm_optional(front.get("mode")),
+            model=_norm_optional(front.get("model")),
             prompt=text.split("---", 2)[2].strip() if text.strip().startswith("---") and text.count("---") >= 2 else text.strip(),
-            permission=front.get("permission"),
+            permission=_norm_optional(front.get("permission")),
         )
     return agents
 

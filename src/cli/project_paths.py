@@ -41,6 +41,8 @@ def ensure_mirage_scaffold(root: Path | None = None) -> bool:
         (project_root / ".mirage").mkdir(parents=True, exist_ok=True)
         (project_root / ".mirage" / "agents").mkdir(parents=True, exist_ok=True)
         (project_root / ".mirage" / "commands").mkdir(parents=True, exist_ok=True)
+        (project_root / ".mirage" / "plans").mkdir(parents=True, exist_ok=True)
+        (project_root / ".mirage" / "specs").mkdir(parents=True, exist_ok=True)
         return True
     except OSError:
         return False

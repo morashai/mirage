@@ -58,6 +58,40 @@ class MirageCompatTests(unittest.TestCase):
             self.assertEqual(agents["review"].mode, "subagent")
             self.assertIn("Prompt", agents["review"].prompt)
 
+    def test_null_frontmatter_values_are_normalized(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            cmd_dir = root / ".mirage" / "commands"
+            cmd_dir.mkdir(parents=True, exist_ok=True)
+            (cmd_dir / "build.md").write_text(
+                "---\n"
+                "description: Build\n"
+                "agent: null\n"
+                "model: null\n"
+                "---\n"
+                "echo ok\n",
+                encoding="utf-8",
+            )
+            agents_dir = root / ".mirage" / "agents"
+            agents_dir.mkdir(parents=True, exist_ok=True)
+            (agents_dir / "custom.md").write_text(
+                "---\n"
+                "description: Custom\n"
+                "mode: null\n"
+                "model: ~\n"
+                "permission: None\n"
+                "---\n"
+                "Prompt\n",
+                encoding="utf-8",
+            )
+            commands = load_custom_commands(root)
+            agents = load_custom_agents(root)
+            self.assertIsNone(commands["build"].agent)
+            self.assertIsNone(commands["build"].model)
+            self.assertIsNone(agents["custom"].mode)
+            self.assertIsNone(agents["custom"].model)
+            self.assertIsNone(agents["custom"].permission)
+
     def test_project_default_model_parsing(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
@@ -94,6 +128,8 @@ class MirageCompatTests(unittest.TestCase):
             self.assertTrue((root / ".mirage").is_dir())
             self.assertTrue((root / ".mirage" / "agents").is_dir())
             self.assertTrue((root / ".mirage" / "commands").is_dir())
+            self.assertTrue((root / ".mirage" / "specs").is_dir())
+            self.assertTrue((root / ".mirage" / "plans").is_dir())
 
     def test_find_project_root_with_mirage_json(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

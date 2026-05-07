@@ -169,6 +169,8 @@ def show_help() -> None:
         ("/help", "show this help"),
         ("/connect", "open provider+model setup form"),
         ("/init", "create AGENTS.md scaffold"),
+        ("/spec [title]", "create .mirage/specs/<title>.md and switch to plan mode"),
+        ("/plan [title]", "create .mirage/plans/<title>.md and switch to plan mode"),
         ("/clear", "clear the screen"),
         ("/reset", "alias · start a new session"),
         ("/new [name]", "create a new chat session"),
