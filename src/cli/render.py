@@ -177,6 +177,9 @@ def print_status(message: str, kind: str = "info") -> None:
         "success": SUCCESS,
         "error": "#d96b6b",
         "warn": "#d6a96c",
+        "event": ACCENT,
+        "working": JORDAN_RED,
+        "idle": JORDAN_GREEN,
     }.get(kind, MUTED)
     console.print(Text(f"  {message}", style=f"{color}"))
 

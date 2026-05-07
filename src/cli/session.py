@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import os
+import re
 import sys
 from dataclasses import replace
 
@@ -27,6 +28,121 @@ from .render import (
     print_welcome,
     show_help,
 )
+
+
+_FILE_WRITE_PATTERNS: tuple[re.Pattern[str], ...] = (
+    re.compile(r"Successfully wrote to (?P<path>.+)$"),
+    re.compile(r"Successfully updated (?P<path>.+)$"),
+)
+
+
+def _extract_tool_args_path(tool_call: dict) -> str | None:
+    """Best-effort file path extraction from tool call args."""
+    args = tool_call.get("args")
+    if isinstance(args, dict):
+        for key in ("filepath", "path", "file_path", "filename"):
+            value = args.get(key)
+            if isinstance(value, str) and value.strip():
+                return value.strip()
+    return None
+
+
+def _extract_written_file(content: str) -> str | None:
+    """Parse tool result text and return a written/updated path when present."""
+    if not content:
+        return None
+    for line in content.splitlines():
+        text = line.strip()
+        for pattern in _FILE_WRITE_PATTERNS:
+            match = pattern.match(text)
+            if match:
+                return match.group("path").strip()
+    return None
+
+
+def _iter_live_stream_events(graph, payload, config):
+    """Yield normalized ``(mode, data)`` events from LangGraph stream APIs.
+
+    Prefer richer multi-mode streaming so CLI can expose granular activity.
+    Fallback to plain ``updates`` mode when multi-mode is unavailable.
+    """
+    try:
+        stream = graph.stream(
+            payload,
+            config,
+            stream_mode=["updates", "values"],
+        )
+        for item in stream:
+            if (
+                isinstance(item, tuple)
+                and len(item) == 2
+                and isinstance(item[0], str)
+            ):
+                yield item[0], item[1]
+            else:
+                yield "updates", item
+    except TypeError:
+        # Older LangGraph versions may not accept multi-mode lists.
+        for item in graph.stream(payload, config, stream_mode="updates"):
+            yield "updates", item
+
+
+def _emit_live_message_events(
+    state_snapshot: dict,
+    *,
+    seen_message_keys: set[str],
+    seen_live_events: set[str],
+) -> None:
+    """Render newly-seen messages from the state snapshot."""
+    if not isinstance(state_snapshot, dict):
+        return
+    messages = state_snapshot.get("messages")
+    if not isinstance(messages, list):
+        return
+
+    for index, msg in enumerate(messages):
+        msg_id = getattr(msg, "id", None)
+        message_key = str(msg_id) if msg_id else f"idx:{index}:{type(msg).__name__}"
+        if message_key in seen_message_keys:
+            continue
+        seen_message_keys.add(message_key)
+
+        msg_type = str(getattr(msg, "type", "")).lower()
+        name = str(getattr(msg, "name", "") or "")
+        content = getattr(msg, "content", "") or ""
+
+        tool_calls = getattr(msg, "tool_calls", None) or []
+        if tool_calls:
+            for tool_call in tool_calls:
+                tool_name = str(tool_call.get("name", "tool"))
+                target = _extract_tool_args_path(tool_call)
+                event_key = f"call:{tool_name}:{target or ''}:{tool_call.get('id', '')}"
+                if event_key in seen_live_events:
+                    continue
+                seen_live_events.add(event_key)
+                if target:
+                    print_status(f"[live] tool call -> {tool_name} ({target})", "event")
+                else:
+                    print_status(f"[live] tool call -> {tool_name}", "event")
+
+        if msg_type == "tool":
+            text = str(content).strip()
+            if text:
+                preview = text if len(text) <= 240 else f"{text[:240]}..."
+                print_status(f"[live] tool result: {preview}", "info")
+            written_file = _extract_written_file(str(content))
+            if written_file:
+                event_key = f"file:{written_file}"
+                if event_key not in seen_live_events:
+                    seen_live_events.add(event_key)
+                    print_status(f"[live] file updated: {written_file}", "success")
+            continue
+
+        if msg_type in {"ai", "assistant"}:
+            # Only render substantive assistant turns, skip pure tool-call wrappers.
+            if str(content).strip():
+                display_name = name if name else "Developer"
+                print_agent_message(display_name, str(content))
 
 
 def _build_session_graph(provider: str, model: str):
@@ -333,6 +449,7 @@ def run_agent(
     handoff themselves — there is no human-in-the-loop gate.
     """
     config = {"configurable": {"thread_id": thread_id}, "recursion_limit": RECURSION_LIMIT}
+    print_status("[WORKING] Mirage agents are running...", "working")
 
     spinner = console.status(
         Text("thinking…", style=f"italic {ACCENT}"),
@@ -343,50 +460,54 @@ def run_agent(
     spinner_running = True
     last_sig: tuple[str, str] | None = None
     stagnant_repeats = 0
+    seen_live_events: set[str] = set()
+    seen_message_keys: set[str] = set()
 
     try:
-        for event in graph.stream(
+        for mode, event in _iter_live_stream_events(
+            graph,
             {"messages": [HumanMessage(content=task)]},
             config,
-            stream_mode="updates",
         ):
             if spinner_running:
                 spinner.stop()
                 spinner_running = False
 
-            for node_name, node_state in event.items():
-                if node_name == "supervisor":
-                    proposed = (
-                        node_state.get("next", "UNKNOWN")
-                        if isinstance(node_state, dict)
-                        else "UNKNOWN"
-                    )
-                    print_supervisor_routing(proposed)
-                elif (
-                    isinstance(node_state, dict)
-                    and node_state.get("messages")
-                ):
-                    msg = node_state["messages"][-1]
-                    content = getattr(msg, "content", "") or ""
-                    print_agent_message(node_name, content)
-
-                    # Runtime loop guard: break if identical output repeats.
-                    normalized = " ".join(content.split()).strip().lower()
-                    sig = (node_name, normalized)
-                    if normalized and sig == last_sig:
-                        stagnant_repeats += 1
-                    else:
-                        stagnant_repeats = 0
-                    last_sig = sig
-
-                    if stagnant_repeats >= 3:
-                        print_status(
-                            "auto-stopped: repeated identical agent output (possible loop)",
-                            "warn",
+            if mode == "updates" and isinstance(event, dict):
+                for node_name, node_state in event.items():
+                    if node_name == "supervisor":
+                        proposed = (
+                            node_state.get("next", "UNKNOWN")
+                            if isinstance(node_state, dict)
+                            else "UNKNOWN"
                         )
-                        return
+                        print_supervisor_routing(proposed)
+                    elif isinstance(node_state, dict):
+                        msgs = node_state.get("messages")
+                        if isinstance(msgs, list) and msgs:
+                            content = getattr(msgs[-1], "content", "") or ""
+                            normalized = " ".join(str(content).split()).strip().lower()
+                            sig = (node_name, normalized)
+                            if normalized and sig == last_sig:
+                                stagnant_repeats += 1
+                            else:
+                                stagnant_repeats = 0
+                            last_sig = sig
+                            if stagnant_repeats >= 3:
+                                print_status(
+                                    "auto-stopped: repeated identical agent output (possible loop)",
+                                    "warn",
+                                )
+                                return
+            elif mode == "values":
+                _emit_live_message_events(
+                    event,
+                    seen_message_keys=seen_message_keys,
+                    seen_live_events=seen_live_events,
+                )
         if session is not None:
             session.get_state().session_store.touch(thread_id)
     finally:
         if spinner_running:
             spinner.stop()
+        print_status("[IDLE] Mirage agents finished.", "idle")
