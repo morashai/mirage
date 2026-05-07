@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import sqlite3
 import warnings
+from typing import TYPE_CHECKING, Any
 
 from langchain_core._api.deprecation import LangChainPendingDeprecationWarning
 # LangGraph currently triggers a pending-deprecation warning from
@@ -29,7 +30,6 @@ warnings.filterwarnings(
 )
 
 from langchain_core.messages import AIMessage
-from langgraph.checkpoint.sqlite import SqliteSaver
 from langgraph.graph import END, START, StateGraph
 
 from ..config_store import MirageConfig, load_config, resolve_api_key, resolve_base_url
@@ -43,21 +43,35 @@ from .state import AgentState, MEMBERS
 from .supervisor import build_supervisor_chain
 from .ux_ui_designer import build_ux_ui_designer
 
-_sqlite_checkpointer: SqliteSaver | None = None
+if TYPE_CHECKING:
+    from langgraph.checkpoint.sqlite import SqliteSaver
+
+_sqlite_checkpointer: Any | None = None
 _sqlite_conn: sqlite3.Connection | None = None
 
 
-def _get_sqlite_checkpointer() -> SqliteSaver:
-    """Process-wide SQLite checkpointer (persists all ``thread_id`` threads)."""
+def _norm(content: str) -> str:
+    return " ".join((content or "").split()).strip().lower()
+
+
+def _get_checkpointer():
+    """Use SQLite persistence for all LangGraph checkpoints."""
     global _sqlite_checkpointer, _sqlite_conn
     if _sqlite_checkpointer is None:
         from ..config_store import sessions_db_path
+        try:
+            from langgraph.checkpoint.sqlite import SqliteSaver
 
-        path = sessions_db_path()
-        path.parent.mkdir(parents=True, exist_ok=True)
-        _sqlite_conn = sqlite3.connect(str(path), check_same_thread=False)
-        _sqlite_checkpointer = SqliteSaver(_sqlite_conn)
-        _sqlite_checkpointer.setup()
+            path = sessions_db_path()
+            path.parent.mkdir(parents=True, exist_ok=True)
+            _sqlite_conn = sqlite3.connect(str(path), check_same_thread=False)
+            _sqlite_checkpointer = SqliteSaver(_sqlite_conn)
+            _sqlite_checkpointer.setup()
+        except Exception as e:
+            raise RuntimeError(
+                "SQLite checkpoint persistence is required but unavailable. "
+                "Install dependency: `py -m pip install langgraph-checkpoint-sqlite`."
+            ) from e
     return _sqlite_checkpointer
 
 
@@ -88,13 +102,35 @@ def _build_agents(llm):
         result = supervisor_chain.invoke({"messages": state["messages"]})
         chosen = result.next
 
-        # Guardrail: never terminate before any worker has responded.
-        has_worker_reply = any(
-            isinstance(msg, AIMessage) and getattr(msg, "name", "") in MEMBERS
+        worker_msgs = [
+            msg
             for msg in state["messages"]
-        )
+            if isinstance(msg, AIMessage) and getattr(msg, "name", "") in MEMBERS
+        ]
+
+        # Guardrail: never terminate before any worker has responded.
+        has_worker_reply = bool(worker_msgs)
         if not has_worker_reply and chosen == "FINISH":
             chosen = "ProjectManager"
+
+        # Loop guard: repeated two-step ping-pong pattern means no progress.
+        if len(worker_msgs) >= 4:
+            sig = [
+                (m.name, _norm(getattr(m, "content", "") or ""))
+                for m in worker_msgs[-4:]
+            ]
+            if sig[0] == sig[2] and sig[1] == sig[3]:
+                chosen = "FINISH"
+
+        # If the developer has repeated the same response, terminate gracefully.
+        if len(worker_msgs) >= 3:
+            last3 = worker_msgs[-3:]
+            if all(m.name == "Developer" for m in last3):
+                a = _norm(getattr(last3[0], "content", "") or "")
+                b = _norm(getattr(last3[1], "content", "") or "")
+                c = _norm(getattr(last3[2], "content", "") or "")
+                if a and a == b == c:
+                    chosen = "FINISH"
 
         return {"next": chosen}
 
@@ -155,5 +191,5 @@ def build_graph(
     )
     workflow.add_edge(START, "supervisor")
 
-    memory = _get_sqlite_checkpointer()
+    memory = _get_checkpointer()
     return workflow.compile(checkpointer=memory)

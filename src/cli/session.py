@@ -250,6 +250,8 @@ def run_agent(graph, task: str, thread_id: str, session: dict | None = None) -> 
     )
     spinner.start()
     spinner_running = True
+    last_sig: tuple[str, str] | None = None
+    stagnant_repeats = 0
 
     try:
         for event in graph.stream(
@@ -274,7 +276,24 @@ def run_agent(graph, task: str, thread_id: str, session: dict | None = None) -> 
                     and node_state.get("messages")
                 ):
                     msg = node_state["messages"][-1]
-                    print_agent_message(node_name, getattr(msg, "content", "") or "")
+                    content = getattr(msg, "content", "") or ""
+                    print_agent_message(node_name, content)
+
+                    # Runtime loop guard: break if identical output repeats.
+                    normalized = " ".join(content.split()).strip().lower()
+                    sig = (node_name, normalized)
+                    if normalized and sig == last_sig:
+                        stagnant_repeats += 1
+                    else:
+                        stagnant_repeats = 0
+                    last_sig = sig
+
+                    if stagnant_repeats >= 3:
+                        print_status(
+                            "auto-stopped: repeated identical agent output (possible loop)",
+                            "warn",
+                        )
+                        return
         if session is not None:
             session["session_store"].touch(thread_id)
     finally:
