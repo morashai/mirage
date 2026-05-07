@@ -1,0 +1,27 @@
+[build-system]
+requires = ["setuptools>=69", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "mirage-cli"
+version = "0.1.0"
+description = "Mirage 5 multi-agent CLI powered by LangGraph."
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "dotenv>=0.9.9",
+    "langchain>=1.2.17",
+    "langchain-openai>=1.2.1",
+    "langgraph>=1.1.10",
+    "prompt-toolkit>=3.0.52",
+    "pydantic>=2.13.4",
+    "rich>=13.9.0",
+    "typer>=0.25.1",
+]
+
+[project.scripts]
+mirage = "src.cli.app:main"
+mirage-cli = "src.cli.app:main"
+
+[tool.setuptools.packages.find]
+include = ["src*"]
