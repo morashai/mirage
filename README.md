@@ -2,6 +2,8 @@
 
 Mirage is an open-source coding agent CLI, similar in spirit to Claude-style terminal agents, built on top of **LangChain** and **LangGraph**.
 
+![Mirage CLI preview](./image.png)
+
 
 It runs a 3-agent product team:
 - `ProjectManager` (planning, read-only)
