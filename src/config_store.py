@@ -4,7 +4,7 @@ from __future__ import annotations
 import json
 import os
 import stat
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -63,6 +63,24 @@ class MirageConfig:
         return self.providers[provider]
 
 
+@dataclass
+class MCPServerConfig:
+    name: str
+    enabled: bool
+    kind: str  # local | remote
+    command: str | None = None
+    args: list[str] = field(default_factory=list)
+    url: str | None = None
+
+
+def user_mcp_servers_path() -> Path:
+    return mirage_dir() / "mcp_servers.json"
+
+
+def project_mcp_servers_path() -> Path:
+    return find_project_root() / ".mirage" / "mcp_servers.json"
+
+
 def _umask_safe_write(path: Path, text: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_suffix(path.suffix + ".tmp")
@@ -73,6 +91,119 @@ def _umask_safe_write(path: Path, text: str) -> None:
         os.chmod(path, mode)
     except (NotImplementedError, OSError, PermissionError):
         pass
+
+
+def _load_mcp_blob(path: Path) -> dict[str, Any]:
+    if not path.is_file():
+        return {"servers": []}
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError):
+        return {"servers": []}
+    if not isinstance(payload, dict):
+        return {"servers": []}
+    payload.setdefault("servers", [])
+    if not isinstance(payload["servers"], list):
+        payload["servers"] = []
+    return payload
+
+
+def _save_mcp_blob(path: Path, payload: dict[str, Any]) -> None:
+    text = json.dumps(payload, indent=2, sort_keys=True) + "\n"
+    _umask_safe_write(path, text)
+
+
+def _row_to_mcp_server(row: dict[str, Any]) -> MCPServerConfig | None:
+    try:
+        name = str(row.get("name") or "").strip()
+        kind = str(row.get("kind") or "").strip().lower()
+        if not name or kind not in {"local", "remote"}:
+            return None
+        enabled = bool(row.get("enabled", True))
+        command = str(row.get("command") or "").strip() or None
+        url = str(row.get("url") or "").strip() or None
+        raw_args = row.get("args") if isinstance(row.get("args"), list) else []
+        args = [str(x) for x in raw_args]
+        return MCPServerConfig(
+            name=name,
+            enabled=enabled,
+            kind=kind,
+            command=command,
+            args=args,
+            url=url,
+        )
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def list_mcp_servers(scope: str) -> list[MCPServerConfig]:
+    target = user_mcp_servers_path() if scope == "user" else project_mcp_servers_path()
+    payload = _load_mcp_blob(target)
+    servers: list[MCPServerConfig] = []
+    for row in payload.get("servers", []):
+        if not isinstance(row, dict):
+            continue
+        parsed = _row_to_mcp_server(row)
+        if parsed:
+            servers.append(parsed)
+    return servers
+
+
+def list_mcp_servers_merged() -> list[MCPServerConfig]:
+    merged: dict[str, MCPServerConfig] = {}
+    for server in list_mcp_servers("user"):
+        merged[server.name] = server
+    for server in list_mcp_servers("project"):
+        merged[server.name] = server
+    return sorted(merged.values(), key=lambda x: x.name.lower())
+
+
+def save_mcp_server(server: MCPServerConfig, scope: str) -> None:
+    target = user_mcp_servers_path() if scope == "user" else project_mcp_servers_path()
+    payload = _load_mcp_blob(target)
+    rows = [r for r in payload.get("servers", []) if isinstance(r, dict)]
+    updated = False
+    for idx, row in enumerate(rows):
+        if str(row.get("name") or "").strip() == server.name:
+            rows[idx] = asdict(server)
+            updated = True
+            break
+    if not updated:
+        rows.append(asdict(server))
+    payload["servers"] = rows
+    _save_mcp_blob(target, payload)
+
+
+def disable_mcp_server(name: str, scope: str) -> bool:
+    target = user_mcp_servers_path() if scope == "user" else project_mcp_servers_path()
+    payload = _load_mcp_blob(target)
+    rows = [r for r in payload.get("servers", []) if isinstance(r, dict)]
+    changed = False
+    found = False
+    for row in rows:
+        if str(row.get("name") or "").strip() == name:
+            found = True
+            if bool(row.get("enabled", True)):
+                row["enabled"] = False
+                changed = True
+    if not found:
+        return False
+    if changed:
+        payload["servers"] = rows
+        _save_mcp_blob(target, payload)
+    return True
+
+
+def delete_mcp_server(name: str, scope: str) -> bool:
+    target = user_mcp_servers_path() if scope == "user" else project_mcp_servers_path()
+    payload = _load_mcp_blob(target)
+    rows = [r for r in payload.get("servers", []) if isinstance(r, dict)]
+    new_rows = [r for r in rows if str(r.get("name") or "").strip() != name]
+    if len(new_rows) == len(rows):
+        return False
+    payload["servers"] = new_rows
+    _save_mcp_blob(target, payload)
+    return True
 
 
 def _default_providers_blob() -> dict[str, dict[str, Any]]:

@@ -18,7 +18,16 @@ import typer
 from rich.prompt import Confirm
 
 from ..agents.graph import build_graph
-from ..config_store import load_config, resolve_api_key, save_config
+from ..config_store import (
+    MCPServerConfig,
+    delete_mcp_server,
+    disable_mcp_server,
+    list_mcp_servers_merged,
+    load_config,
+    resolve_api_key,
+    save_config,
+    save_mcp_server,
+)
 from ..llm.catalog import PROVIDERS
 from ..llm.spec import LLMSpec
 from ..sessions.store import SessionStore, new_thread_id, resolve_session_selector
@@ -226,9 +235,89 @@ mcp_app = typer.Typer(help="MCP compatibility commands.", add_completion=False)
 @mcp_app.command("list")
 @mcp_app.command("ls")
 def mcp_list() -> None:
-    mcp_root = Path.home() / ".cursor" / "projects"
-    print_status(f"mcp descriptors root: {mcp_root}", "info")
-    print_status("use built-in MCP descriptor tools inside chat for full details", "info")
+    rows = list_mcp_servers_merged()
+    if not rows:
+        print_status("no configured MCP servers", "info")
+        return
+    for row in rows:
+        detail = (
+            f"command={row.command} args={row.args}"
+            if row.kind == "local"
+            else f"url={row.url}"
+        )
+        print_status(
+            f"{row.name}: kind={row.kind} enabled={row.enabled} {detail}",
+            "info",
+        )
+
+
+@mcp_app.command("add")
+def mcp_add(
+    name: str = typer.Option(..., "--name", help="Server name"),
+    command: str | None = typer.Option(None, "--command", help="Local server command"),
+    arg: list[str] = typer.Option([], "--arg", help="Repeated arg for local command server"),
+    url: str | None = typer.Option(None, "--url", help="Remote MCP URL"),
+    scope: str = typer.Option("project", "--scope", help="user|project"),
+) -> None:
+    sc = scope.strip().lower()
+    if sc not in {"user", "project"}:
+        print_status("scope must be user or project", "error")
+        raise typer.Exit(code=1)
+    has_local = bool(command and command.strip())
+    has_remote = bool(url and url.strip())
+    if has_local == has_remote:
+        print_status("provide exactly one of --command or --url", "error")
+        raise typer.Exit(code=1)
+    if has_local:
+        server = MCPServerConfig(
+            name=name.strip(),
+            enabled=True,
+            kind="local",
+            command=command.strip(),
+            args=list(arg),
+            url=None,
+        )
+    else:
+        server = MCPServerConfig(
+            name=name.strip(),
+            enabled=True,
+            kind="remote",
+            command=None,
+            args=[],
+            url=url.strip(),
+        )
+    save_mcp_server(server, sc)
+    print_status(f"✓ MCP server saved: {server.name} ({server.kind}, scope={sc})", "success")
+
+
+@mcp_app.command("disable")
+def mcp_disable(
+    name: str = typer.Argument(..., help="Server name"),
+    scope: str = typer.Option("project", "--scope", help="user|project"),
+) -> None:
+    sc = scope.strip().lower()
+    if sc not in {"user", "project"}:
+        print_status("scope must be user or project", "error")
+        raise typer.Exit(code=1)
+    if not disable_mcp_server(name.strip(), sc):
+        print_status(f"MCP server not found in {sc} scope: {name}", "error")
+        raise typer.Exit(code=1)
+    print_status(f"✓ MCP server disabled: {name} (scope={sc})", "success")
+
+
+@mcp_app.command("delete")
+def mcp_delete(
+    name: str = typer.Argument(..., help="Server name"),
+    scope: str = typer.Option("project", "--scope", help="user|project"),
+) -> None:
+    sc = scope.strip().lower()
+    if sc not in {"user", "project"}:
+        print_status("scope must be user or project", "error")
+        raise typer.Exit(code=1)
+    if not delete_mcp_server(name.strip(), sc):
+        print_status(f"MCP server not found in {sc} scope: {name}", "error")
+        raise typer.Exit(code=1)
+    print_status(f"✓ MCP server deleted: {name} (scope={sc})", "success")
 
 
 @mcp_app.command("auth")

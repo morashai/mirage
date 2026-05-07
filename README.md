@@ -37,7 +37,7 @@ Mirage now includes a unified compatibility surface so teams can adopt Mirage wi
 - Command aliases and parity-style commands:
   - `mirage session ...` (alias for `sessions`)
   - `mirage auth login|list|logout`
-  - `mirage mcp list|auth|logout|debug`
+  - `mirage mcp add|list|delete|disable|auth|logout|debug`
   - `mirage export`, `mirage import`, `mirage stats`
   - `mirage serve`, `mirage web`, `mirage attach`
 - `run` supports parity flags such as `--session`, `--continue`, `--fork`, `--file`, `--format`, `--title`, `--agent`, and `--attach`.
@@ -392,9 +392,22 @@ Credential-centric provider commands.
 MCP compatibility command group.
 
 - `mirage mcp list` (alias: `ls`)
+- `mirage mcp add --name <name> [--command <cmd> --arg <value> ... | --url <url>] [--scope user|project]`
+- `mirage mcp delete <name> [--scope user|project]`
+- `mirage mcp disable <name> [--scope user|project]`
 - `mirage mcp auth [name]`
 - `mirage mcp logout <name>`
 - `mirage mcp debug <name>`
+
+Examples:
+
+```bash
+mirage mcp add --name github --command npx --arg -y --arg @modelcontextprotocol/server-github --scope user
+mirage mcp add --name linear --url https://mcp.linear.app --scope project
+mirage mcp delete linear --scope project
+mirage mcp disable github --scope project
+mirage mcp list
+```
 
 ### `mirage export`
 
@@ -477,6 +490,11 @@ mirage attach http://localhost:4096
 - `/provider [name]` — same form, pre-select provider
 - `/config` — read-only configuration panels (masked keys)
 - `/config edit` — open the model form pre-filled
+- `/mcp list` — list configured MCP servers
+- `/mcp add --name <name> --command <cmd> [--arg ...] [--scope user|project]` — add local MCP server
+- `/mcp add --name <name> --url <url> [--scope user|project]` — add remote MCP server
+- `/mcp delete <name> [--scope user|project]` — delete configured server
+- `/mcp disable <name> [--scope user|project]` — disable server
 - `/models [provider]` — print curated model ids
 - `/exit`, `/quit`, `/q` — exit
 

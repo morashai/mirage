@@ -7,6 +7,8 @@ from pathlib import Path
 
 from langchain_core.tools import tool
 
+from ..config_store import list_mcp_servers_merged
+
 
 def _mcps_root() -> Path:
     env_root = os.getenv("MIRAGE_MCPS_ROOT")
@@ -21,10 +23,28 @@ def list_mcp_servers() -> str:
     """List available MCP servers from local descriptor folder."""
     try:
         root = _mcps_root()
-        if not root.exists():
-            return f"No MCP descriptors found at {root}"
-        servers = sorted([p.name for p in root.iterdir() if p.is_dir()])
-        return "\n".join(servers) if servers else "No MCP servers found."
+        descriptor_servers: list[str] = []
+        if root.exists():
+            descriptor_servers = sorted([p.name for p in root.iterdir() if p.is_dir()])
+        configured = list_mcp_servers_merged()
+        configured_names = [s.name for s in configured]
+        all_names = sorted(set(descriptor_servers + configured_names))
+        if not all_names:
+            return f"No MCP servers found (descriptors root: {root})."
+        lines: list[str] = []
+        configured_map = {s.name: s for s in configured}
+        descriptor_set = set(descriptor_servers)
+        for name in all_names:
+            tags: list[str] = []
+            if name in descriptor_set:
+                tags.append("descriptor")
+            if name in configured_map:
+                tags.append(
+                    f"configured:{'enabled' if configured_map[name].enabled else 'disabled'}"
+                )
+            tag_text = f" ({', '.join(tags)})" if tags else ""
+            lines.append(f"{name}{tag_text}")
+        return "\n".join(lines)
     except Exception as exc:
         return f"Error: {exc}"
 

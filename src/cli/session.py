@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import os
 import re
+import shlex
 import sys
 import tempfile
 from pathlib import Path
@@ -13,7 +14,16 @@ from langchain_core.messages import HumanMessage
 
 from ..agents.graph import build_graph
 from ..config import RECURSION_LIMIT
-from ..config_store import load_config, parse_model_arg, resolve_api_key
+from ..config_store import (
+    MCPServerConfig,
+    delete_mcp_server,
+    disable_mcp_server,
+    list_mcp_servers_merged,
+    load_config,
+    parse_model_arg,
+    resolve_api_key,
+    save_mcp_server,
+)
 from ..llm.catalog import PROVIDERS
 from ..llm.spec import LLMSpec
 from ..sessions.store import SessionStore, new_thread_id, resolve_session_selector
@@ -55,6 +65,29 @@ _HITL_HINT_PATTERNS: tuple[re.Pattern[str], ...] = (
 _DETAILS_VISIBLE = True
 _THINKING_VISIBLE = False
 _SHARED_SESSIONS: set[str] = set()
+
+
+def _parse_flag_map(arg: str | None) -> tuple[list[str], dict[str, list[str]]]:
+    tokens = shlex.split(arg or "")
+    positionals: list[str] = []
+    flags: dict[str, list[str]] = {}
+    i = 0
+    while i < len(tokens):
+        tok = tokens[i]
+        if tok.startswith("--"):
+            key = tok[2:].strip().lower()
+            if not key:
+                i += 1
+                continue
+            value = ""
+            if i + 1 < len(tokens) and not tokens[i + 1].startswith("--"):
+                value = tokens[i + 1]
+                i += 1
+            flags.setdefault(key, []).append(value)
+        else:
+            positionals.append(tok)
+        i += 1
+    return positionals, flags
 
 
 def _classify_tool_action(tool_name: str) -> str:
@@ -608,6 +641,89 @@ def handle_slash_command(raw: str, session: RuntimeSessionStore) -> bool:
             open_model_configuration(session, f"{state.provider}:{state.model}")
         else:
             print_config_form(cfg, active_provider=state.provider)
+        return True
+
+    if cmd == "/mcp":
+        pos, flags = _parse_flag_map(arg)
+        if not pos:
+            print_status("usage: /mcp <list|add|delete|disable> [...]", "error")
+            return True
+        sub = pos[0].lower()
+        if sub == "list":
+            rows = list_mcp_servers_merged()
+            if not rows:
+                print_status("no configured MCP servers", "info")
+                return True
+            for row in rows:
+                detail = (
+                    f"command={row.command} args={row.args}"
+                    if row.kind == "local"
+                    else f"url={row.url}"
+                )
+                print_status(
+                    f"{row.name}: kind={row.kind} enabled={row.enabled} {detail}",
+                    "info",
+                )
+            return True
+        if sub == "add":
+            name = (flags.get("name") or [""])[0].strip()
+            command = (flags.get("command") or [""])[0].strip()
+            url = (flags.get("url") or [""])[0].strip()
+            scope = (flags.get("scope") or ["project"])[0].strip().lower()
+            args = [v for v in flags.get("arg", []) if v]
+            if not name:
+                print_status("usage: /mcp add --name <name> (--command <cmd> [--arg ...] | --url <url>) [--scope user|project]", "error")
+                return True
+            if scope not in {"user", "project"}:
+                print_status("scope must be user or project", "error")
+                return True
+            has_local = bool(command)
+            has_remote = bool(url)
+            if has_local == has_remote:
+                print_status("provide exactly one of --command or --url", "error")
+                return True
+            if has_local:
+                server = MCPServerConfig(
+                    name=name,
+                    enabled=True,
+                    kind="local",
+                    command=command,
+                    args=args,
+                    url=None,
+                )
+            else:
+                server = MCPServerConfig(
+                    name=name,
+                    enabled=True,
+                    kind="remote",
+                    command=None,
+                    args=[],
+                    url=url,
+                )
+            save_mcp_server(server, scope)
+            print_status(f"✓ MCP server saved: {name} ({server.kind}, scope={scope})", "success")
+            return True
+        if sub in {"disable", "delete"}:
+            name = pos[1].strip() if len(pos) > 1 else (flags.get("name") or [""])[0].strip()
+            scope = (flags.get("scope") or ["project"])[0].strip().lower()
+            if not name:
+                print_status(f"usage: /mcp {sub} <name> [--scope user|project]", "error")
+                return True
+            if scope not in {"user", "project"}:
+                print_status("scope must be user or project", "error")
+                return True
+            if sub == "disable":
+                if not disable_mcp_server(name, scope):
+                    print_status(f"MCP server not found in {scope} scope: {name}", "error")
+                    return True
+                print_status(f"✓ MCP server disabled: {name} (scope={scope})", "success")
+            else:
+                if not delete_mcp_server(name, scope):
+                    print_status(f"MCP server not found in {scope} scope: {name}", "error")
+                    return True
+                print_status(f"✓ MCP server deleted: {name} (scope={scope})", "success")
+            return True
+        print_status("usage: /mcp <list|add|delete|disable> [...]", "error")
         return True
 
     if cmd == "/models":
