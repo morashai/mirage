@@ -20,8 +20,11 @@ dependencies = [
 ]
 
 [project.scripts]
-mirage = "src.cli.app:main"
-mirage-cli = "src.cli.app:main"
+mirage = "mirage_cli:main"
+mirage-cli = "mirage_cli:main"
+
+[tool.setuptools]
+py-modules = ["mirage_cli"]
 
 [tool.setuptools.packages.find]
 include = ["src*"]

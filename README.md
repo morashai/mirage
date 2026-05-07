@@ -21,9 +21,35 @@ The interface is themed as **MIRAGE** (Jordanian military palette + aviation sty
 - Non-interactive single-task mode
 - Thread-aware memory (via LangGraph checkpointer)
 - Slash commands for session control (`/help`, `/thread`, `/model`, etc.)
+- Deduplicated Claude-style core toolset for filesystem, shell, search, git, web, notebook, and MCP descriptor discovery
 - Installable package with console scripts:
   - `mirage`
   - `mirage-cli`
+
+---
+
+## Tool catalog (core)
+
+Mirage now ships a canonical, deduplicated core tool registry under `src/tools/`.
+
+- **Read-only tools** (ProjectManager + UXUIDesigner):
+  - filesystem: `list_directory`, `read_file`
+  - search: `glob_search`, `ripgrep_search`
+  - git: `git_status`, `git_diff`, `git_log`, `git_current_branch`
+  - web: `web_fetch`, `web_search`
+  - notebook: `read_notebook`
+  - mcp descriptors: `list_mcp_servers`, `list_mcp_tools`, `read_mcp_tool_schema`
+- **Developer-only extras**:
+  - filesystem write: `write_file`, `edit_file`
+  - execution: `run_shell_command`
+  - notebook edit: `edit_notebook_cell`
+  - MCP call placeholder: `call_mcp_tool`
+
+Deduplication is enforced at startup. If duplicate tool ids are exported, Mirage fails fast.
+
+Intentionally skipped in this pass:
+- team/task orchestration-style tooling
+- scheduling/cron and remote-trigger style tooling
 
 ---
 
@@ -51,7 +77,14 @@ Optional tools:
    ├─ config.py
    ├─ theme.py
    ├─ tools/
-   │  └─ filesystem.py
+   │  ├─ catalog.py
+   │  ├─ filesystem.py
+   │  ├─ shell.py
+   │  ├─ search.py
+   │  ├─ git_tools.py
+   │  ├─ web_tools.py
+   │  ├─ notebook_tools.py
+   │  └─ mcp_tools.py
    ├─ agents/
    │  ├─ prompts.py
    │  ├─ state.py
@@ -289,6 +322,22 @@ mirage chat
 # or
 mirage run "your task"
 ```
+
+### `ModuleNotFoundError: No module named 'src'` when running `mirage`
+
+This usually means the `mirage` launcher on your `PATH` was created by a
+different Python environment than the one where you installed this project.
+
+Reinstall with the same interpreter you use to run `mirage`:
+
+```bash
+python -m pip uninstall -y mirage-cli
+python -m pip install -e .
+python -m mirage_cli
+```
+
+If `python` points to a different version than your launcher, use the exact
+interpreter explicitly (for example `py -3.13 -m pip install -e .`).
 
 ---
 

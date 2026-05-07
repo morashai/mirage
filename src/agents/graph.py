@@ -27,11 +27,12 @@ warnings.filterwarnings(
     ),
 )
 
+from langchain_core.messages import AIMessage
 from langchain_openai import ChatOpenAI
 from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.graph import END, START, StateGraph
 
-from ..tools import edit_file, list_directory, read_file, write_file
+from ..tools import DEVELOPER_TOOLS, READ_ONLY_TOOLS
 from .developer import build_developer
 from .factory import make_node
 from .project_manager import build_project_manager
@@ -48,15 +49,15 @@ def _build_agents(model_name: str):
     """
     llm = ChatOpenAI(model=model_name)
 
-    pm_tools = [list_directory, read_file]
+    pm_tools = list(READ_ONLY_TOOLS)
     project_manager_agent = build_project_manager(llm, pm_tools)
 
     # Designer is read-only by design — it plans and hands off; only the
     # Developer is allowed to create or modify code or files.
-    designer_tools = [list_directory, read_file]
+    designer_tools = list(READ_ONLY_TOOLS)
     designer_agent = build_ux_ui_designer(llm, designer_tools)
 
-    developer_tools = [list_directory, read_file, write_file, edit_file]
+    developer_tools = list(DEVELOPER_TOOLS)
     developer_agent = build_developer(llm, developer_tools)
 
     supervisor_chain = build_supervisor_chain(llm)
@@ -67,7 +68,17 @@ def _build_agents(model_name: str):
 
     def supervisor_node(state: AgentState):
         result = supervisor_chain.invoke({"messages": state["messages"]})
-        return {"next": result.next}
+        chosen = result.next
+
+        # Guardrail: never terminate before any worker has responded.
+        has_worker_reply = any(
+            isinstance(msg, AIMessage) and getattr(msg, "name", "") in MEMBERS
+            for msg in state["messages"]
+        )
+        if not has_worker_reply and chosen == "FINISH":
+            chosen = "ProjectManager"
+
+        return {"next": chosen}
 
     return {
         "ProjectManager": project_manager_node,
