@@ -35,6 +35,49 @@ _FILE_WRITE_PATTERNS: tuple[re.Pattern[str], ...] = (
     re.compile(r"Successfully updated (?P<path>.+)$"),
 )
 
+_HITL_HINT_PATTERNS: tuple[re.Pattern[str], ...] = (
+    re.compile(r"\bplease clarify\b", re.IGNORECASE),
+    re.compile(r"\bcould you clarify\b", re.IGNORECASE),
+    re.compile(r"\bcan you clarify\b", re.IGNORECASE),
+    re.compile(r"\bplease confirm\b", re.IGNORECASE),
+    re.compile(r"\bwhich (?:one|option|approach)\b", re.IGNORECASE),
+    re.compile(r"\bdo you want\b", re.IGNORECASE),
+    re.compile(r"\bshould (?:it|we|i)\b", re.IGNORECASE),
+    re.compile(r"\bonce you provide\b", re.IGNORECASE),
+)
+
+
+def _classify_tool_action(tool_name: str) -> str:
+    """Return a human label for tool actions in live logs."""
+    name = tool_name.lower()
+    if name in {"write_file"}:
+        return "create-file"
+    if name in {"edit_file", "edit_notebook_cell"}:
+        return "update-file"
+    if name in {"read_file", "list_directory", "glob_search", "ripgrep_search"}:
+        return "read/search"
+    if name in {"run_shell_command", "git_status", "git_diff", "git_log", "git_current_branch"}:
+        return "shell/git"
+    return "tool"
+
+
+def _tool_result_kind(content: str) -> str:
+    """Map tool result content to status kind."""
+    text = content.strip().lower()
+    if text.startswith("error:") or "traceback" in text:
+        return "error"
+    return "info"
+
+
+def _is_human_input_request(content: str) -> bool:
+    """Heuristic: detect agent messages that ask user clarification."""
+    text = " ".join((content or "").split()).strip()
+    if not text:
+        return False
+    if "?" not in text:
+        return False
+    return any(pattern.search(text) for pattern in _HITL_HINT_PATTERNS)
+
 
 def _extract_tool_args_path(tool_call: dict) -> str | None:
     """Best-effort file path extraction from tool call args."""
@@ -92,6 +135,7 @@ def _emit_live_message_events(
     *,
     seen_message_keys: set[str],
     seen_live_events: set[str],
+    pending_tool_calls: dict[str, tuple[str, str | None]],
 ) -> None:
     """Render newly-seen messages from the state snapshot."""
     if not isinstance(state_snapshot, dict):
@@ -115,21 +159,38 @@ def _emit_live_message_events(
         if tool_calls:
             for tool_call in tool_calls:
                 tool_name = str(tool_call.get("name", "tool"))
+                tool_call_id = str(tool_call.get("id", "") or "")
                 target = _extract_tool_args_path(tool_call)
-                event_key = f"call:{tool_name}:{target or ''}:{tool_call.get('id', '')}"
+                event_key = f"call:{tool_name}:{target or ''}:{tool_call_id}"
                 if event_key in seen_live_events:
                     continue
                 seen_live_events.add(event_key)
+                if tool_call_id:
+                    pending_tool_calls[tool_call_id] = (tool_name, target)
+                label = _classify_tool_action(tool_name)
                 if target:
-                    print_status(f"[live] tool call -> {tool_name} ({target})", "event")
+                    print_status(
+                        f"[live] {label}: {tool_name} ({target})",
+                        "event",
+                    )
                 else:
-                    print_status(f"[live] tool call -> {tool_name}", "event")
+                    print_status(f"[live] {label}: {tool_name}", "event")
 
         if msg_type == "tool":
             text = str(content).strip()
+            tool_call_id = str(getattr(msg, "tool_call_id", "") or "")
+            tool_context = pending_tool_calls.pop(tool_call_id, None) if tool_call_id else None
             if text:
                 preview = text if len(text) <= 240 else f"{text[:240]}..."
-                print_status(f"[live] tool result: {preview}", "info")
+                if tool_context:
+                    tool_name, target = tool_context
+                    if target:
+                        prefix = f"[live] result <- {tool_name} ({target})"
+                    else:
+                        prefix = f"[live] result <- {tool_name}"
+                else:
+                    prefix = "[live] tool result"
+                print_status(f"{prefix}: {preview}", _tool_result_kind(text))
             written_file = _extract_written_file(str(content))
             if written_file:
                 event_key = f"file:{written_file}"
@@ -462,6 +523,7 @@ def run_agent(
     stagnant_repeats = 0
     seen_live_events: set[str] = set()
     seen_message_keys: set[str] = set()
+    pending_tool_calls: dict[str, tuple[str, str | None]] = {}
 
     try:
         for mode, event in _iter_live_stream_events(
@@ -486,6 +548,12 @@ def run_agent(
                         msgs = node_state.get("messages")
                         if isinstance(msgs, list) and msgs:
                             content = getattr(msgs[-1], "content", "") or ""
+                            if _is_human_input_request(str(content)):
+                                print_status(
+                                    "[HITL] Agent requested clarification. Waiting for your input...",
+                                    "warn",
+                                )
+                                return
                             normalized = " ".join(str(content).split()).strip().lower()
                             sig = (node_name, normalized)
                             if normalized and sig == last_sig:
@@ -504,6 +572,7 @@ def run_agent(
                     event,
                     seen_message_keys=seen_message_keys,
                     seen_live_events=seen_live_events,
+                    pending_tool_calls=pending_tool_calls,
                 )
         if session is not None:
             session.get_state().session_store.touch(thread_id)
