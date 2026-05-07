@@ -24,9 +24,12 @@ class SessionRecord:
     model: str
     created_at: str
     last_active_at: str
+    parent_thread_id: str | None = None
+    archived_at: str | None = None
+    permission_policy: dict[str, str] | None = None
 
 
-INDEX_VERSION = 1
+INDEX_VERSION = 2
 
 
 class SessionStore:
@@ -43,6 +46,18 @@ class SessionStore:
         except (json.JSONDecodeError, OSError):
             return {"version": INDEX_VERSION, "sessions": []}
 
+    def _normalized_blob(self) -> dict[str, Any]:
+        blob = self._load_blob()
+        rows = blob.get("sessions")
+        if not isinstance(rows, list):
+            rows = []
+        blob["sessions"] = rows
+        version = int(blob.get("version") or 1)
+        if version < INDEX_VERSION:
+            blob["version"] = INDEX_VERSION
+            self._save_blob(blob)
+        return blob
+
     def _save_blob(self, blob: dict[str, Any]) -> None:
         self._path.parent.mkdir(parents=True, exist_ok=True)
         text = json.dumps(blob, indent=2, sort_keys=True) + "\n"
@@ -51,7 +66,7 @@ class SessionStore:
         tmp.replace(self._path)
 
     def list_sessions(self) -> list[SessionRecord]:
-        blob = self._load_blob()
+        blob = self._normalized_blob()
         rows = blob.get("sessions") or []
         out: list[SessionRecord] = []
         for row in rows:
@@ -64,6 +79,21 @@ class SessionStore:
                         model=str(row.get("model") or ""),
                         created_at=str(row.get("created_at") or ""),
                         last_active_at=str(row.get("last_active_at") or ""),
+                        parent_thread_id=(
+                            str(row.get("parent_thread_id")).strip()
+                            if row.get("parent_thread_id")
+                            else None
+                        ),
+                        archived_at=(
+                            str(row.get("archived_at")).strip()
+                            if row.get("archived_at")
+                            else None
+                        ),
+                        permission_policy=(
+                            dict(row.get("permission_policy"))
+                            if isinstance(row.get("permission_policy"), dict)
+                            else None
+                        ),
                     )
                 )
             except (KeyError, TypeError, ValueError):
@@ -84,11 +114,13 @@ class SessionStore:
         name: str,
         provider: str,
         model: str,
+        parent_thread_id: str | None = None,
+        permission_policy: dict[str, str] | None = None,
     ) -> SessionRecord:
         """Insert or update metadata for a thread so it appears in listings."""
         if provider not in PROVIDERS:
             raise ValueError(f"Unknown provider: {provider}")
-        blob = self._load_blob()
+        blob = self._normalized_blob()
         blob.setdefault("version", INDEX_VERSION)
         sessions: list[dict[str, Any]] = list(blob.get("sessions") or [])
         now = _utc_now_iso()
@@ -98,6 +130,10 @@ class SessionStore:
                 row["provider"] = provider
                 row["model"] = model
                 row["last_active_at"] = now
+                if parent_thread_id is not None:
+                    row["parent_thread_id"] = parent_thread_id
+                if permission_policy is not None:
+                    row["permission_policy"] = permission_policy
                 blob["sessions"] = sessions
                 self._save_blob(blob)
                 return SessionRecord(
@@ -107,6 +143,19 @@ class SessionStore:
                     model=str(row["model"]),
                     created_at=str(row.get("created_at") or now),
                     last_active_at=now,
+                    parent_thread_id=(
+                        str(row.get("parent_thread_id"))
+                        if row.get("parent_thread_id")
+                        else None
+                    ),
+                    archived_at=(
+                        str(row.get("archived_at")) if row.get("archived_at") else None
+                    ),
+                    permission_policy=(
+                        dict(row.get("permission_policy"))
+                        if isinstance(row.get("permission_policy"), dict)
+                        else None
+                    ),
                 )
 
         rec = {
@@ -116,6 +165,9 @@ class SessionStore:
             "model": model,
             "created_at": now,
             "last_active_at": now,
+            "parent_thread_id": parent_thread_id,
+            "archived_at": None,
+            "permission_policy": permission_policy,
         }
         sessions.append(rec)
         blob["sessions"] = sessions
@@ -127,10 +179,12 @@ class SessionStore:
             model=model,
             created_at=now,
             last_active_at=now,
+            parent_thread_id=parent_thread_id,
+            permission_policy=permission_policy,
         )
 
     def touch(self, thread_id: str) -> None:
-        blob = self._load_blob()
+        blob = self._normalized_blob()
         sessions: list[dict[str, Any]] = list(blob.get("sessions") or [])
         now = _utc_now_iso()
         for row in sessions:
@@ -141,7 +195,7 @@ class SessionStore:
                 return
 
     def rename(self, thread_id: str, new_name: str) -> bool:
-        blob = self._load_blob()
+        blob = self._normalized_blob()
         sessions: list[dict[str, Any]] = list(blob.get("sessions") or [])
         for row in sessions:
             if row.get("thread_id") == thread_id:
@@ -152,7 +206,7 @@ class SessionStore:
         return False
 
     def delete(self, thread_id: str) -> bool:
-        blob = self._load_blob()
+        blob = self._normalized_blob()
         sessions: list[dict[str, Any]] = list(blob.get("sessions") or [])
         new_list = [r for r in sessions if r.get("thread_id") != thread_id]
         if len(new_list) == len(sessions):
@@ -161,6 +215,72 @@ class SessionStore:
         self._save_blob(blob)
         delete_checkpoint_thread(thread_id)
         return True
+
+    def create(
+        self,
+        *,
+        name: str,
+        provider: str,
+        model: str,
+        parent_thread_id: str | None = None,
+        permission_policy: dict[str, str] | None = None,
+    ) -> SessionRecord:
+        """Create a new root/child session."""
+        tid = new_thread_id()
+        return self.ensure_session(
+            tid,
+            name=name,
+            provider=provider,
+            model=model,
+            parent_thread_id=parent_thread_id,
+            permission_policy=permission_policy,
+        )
+
+    def fork(
+        self,
+        thread_id: str,
+        *,
+        name: str | None = None,
+    ) -> SessionRecord:
+        """Create a child session using parent model/provider/policy."""
+        parent = self.get(thread_id)
+        if parent is None:
+            raise ValueError(f"Session not found: {thread_id}")
+        return self.create(
+            name=name or f"{parent.name} (fork)",
+            provider=parent.provider,
+            model=parent.model,
+            parent_thread_id=parent.thread_id,
+            permission_policy=parent.permission_policy,
+        )
+
+    def set_permission(self, thread_id: str, permission_policy: dict[str, str]) -> bool:
+        blob = self._normalized_blob()
+        sessions: list[dict[str, Any]] = list(blob.get("sessions") or [])
+        for row in sessions:
+            if row.get("thread_id") == thread_id:
+                row["permission_policy"] = dict(permission_policy)
+                row["last_active_at"] = _utc_now_iso()
+                blob["sessions"] = sessions
+                self._save_blob(blob)
+                return True
+        return False
+
+    def set_archived(self, thread_id: str, archived: bool) -> bool:
+        blob = self._normalized_blob()
+        sessions: list[dict[str, Any]] = list(blob.get("sessions") or [])
+        now = _utc_now_iso()
+        for row in sessions:
+            if row.get("thread_id") == thread_id:
+                row["archived_at"] = now if archived else None
+                row["last_active_at"] = now
+                blob["sessions"] = sessions
+                self._save_blob(blob)
+                return True
+        return False
+
+    def list_children(self, parent_thread_id: str) -> list[SessionRecord]:
+        return [s for s in self.list_sessions() if s.parent_thread_id == parent_thread_id]
 
 
 def delete_checkpoint_thread(thread_id: str) -> None:

@@ -40,12 +40,12 @@ from .render import (
 )
 from .session import (
     create_runtime_session_store,
-    enhance_user_prompt,
     ensure_api_key_or_prompt,
     handle_slash_command,
     run_agent,
 )
 from .modes import BUILD_MODE, PLAN_MODE, policy_for_mode
+from .session_events import SessionEvent
 
 
 app = typer.Typer(
@@ -149,8 +149,14 @@ sessions_app = typer.Typer(help="Manage saved chat sessions.", add_completion=Fa
 
 
 @sessions_app.command("list")
-def sessions_list_cmd() -> None:
+def sessions_list_cmd(
+    format: str = typer.Option("table", "--format", help="table|json"),
+) -> None:
     rows = SessionStore().list_sessions()
+    if format == "json":
+        payload = [row.__dict__ for row in rows]
+        print(json.dumps(payload, indent=2))
+        return
     print_sessions_table(rows)
 
 
@@ -166,6 +172,21 @@ def sessions_new(name: str | None = typer.Argument(None, help="Optional session 
         model=cfg.default_model,
     )
     print_status(f"✓ created session {tid}", "success")
+
+
+@sessions_app.command("fork")
+def sessions_fork(
+    selector: str = typer.Argument(..., help="Thread id or list index to fork"),
+    name: str | None = typer.Option(None, "--title", help="Optional new title"),
+) -> None:
+    store = SessionStore()
+    rows = store.list_sessions()
+    hit = resolve_session_selector(selector, rows)
+    if not hit:
+        print_status(f"session not found: {selector}", "error")
+        raise typer.Exit(code=1)
+    child = store.fork(hit.thread_id, name=name)
+    print_status(f"✓ forked {hit.thread_id} -> {child.thread_id}", "success")
 
 
 @sessions_app.command("delete")
@@ -448,16 +469,9 @@ def _start_chat(
         try:
             print_status("[WORKING] Mirage agent is running...", "working")
             current_state = session.get_state()
-            enhanced_input = enhance_user_prompt(
-                user_input,
-                provider=current_state.provider,
-                model=current_state.model,
-            )
-            if enhanced_input.strip() != user_input.strip():
-                print_status("[prompt] enhanced user prompt", "info")
             run_agent(
                 current_state.graph,
-                enhanced_input,
+                user_input,
                 current_state.thread_id,
                 session=session,
             )
@@ -510,7 +524,7 @@ def chat(
 @app.command()
 def run(
     task: str,
-    thread_id: str = typer.Option("mirage-session-1", help="Thread ID for memory."),
+    thread_id: str | None = typer.Option(None, help="Thread ID for memory."),
     model: str | None = typer.Option(None, help="LLM model name."),
     provider: str | None = typer.Option(None, help="openai | anthropic | google"),
     continue_last: bool = typer.Option(
@@ -553,6 +567,11 @@ def run(
             if model is None:
                 mdl = rows[0].model
     if fork:
+        if not session and not continue_last:
+            print_status("--fork requires --continue or --session", "error")
+            raise typer.Exit(code=1)
+        selected_thread = new_thread_id()
+    if selected_thread is None:
         selected_thread = new_thread_id()
 
     if file:
@@ -568,7 +587,6 @@ def run(
         raise typer.Exit(code=1)
     if attach:
         print_status(f"attach requested: {attach} (local fallback mode)", "warn")
-    task = enhance_user_prompt(task, provider=spec.provider, model=spec.model)
     execution_policy = policy_for_mode(BUILD_MODE)
     if agent:
         desired = agent.strip().lower()
@@ -584,15 +602,49 @@ def run(
             provider=spec.provider,
             model=spec.model,
         )
+    else:
+        store.ensure_session(
+            selected_thread,
+            name=(task[:50] + ("..." if len(task) > 50 else "")).strip() or selected_thread,
+            provider=spec.provider,
+            model=spec.model,
+        )
     print_welcome(selected_thread, spec.model, provider=spec.provider)
     graph = build_graph(llm_spec=spec, cfg=cfg)
+    events: list[SessionEvent] = []
+    def _collect_event(event: SessionEvent) -> None:
+        events.append(event)
+        if format == "json":
+            print(
+                json.dumps(
+                    {
+                        "type": event.type,
+                        "timestamp": event.timestamp,
+                        "sessionID": event.session_id,
+                        **event.data,
+                    }
+                )
+            )
+
     try:
-        run_agent(graph, task, selected_thread, session=None, execution_policy=execution_policy)
+        run_agent(
+            graph,
+            task,
+            selected_thread,
+            session=None,
+            execution_policy=execution_policy,
+            event_callback=_collect_event,
+        )
     except Exception as e:  # noqa: BLE001
         print_status(f"error: {e}", "error")
         raise typer.Exit(code=1)
     if format == "json":
-        payload = {"thread_id": selected_thread, "provider": spec.provider, "model": spec.model}
+        payload = {
+            "thread_id": selected_thread,
+            "provider": spec.provider,
+            "model": spec.model,
+            "event_count": len(events),
+        }
         print(json.dumps(payload))
 
 

@@ -9,6 +9,7 @@ import tempfile
 from pathlib import Path
 from dataclasses import replace
 from datetime import datetime, timezone
+from typing import Callable
 
 from langchain_core.messages import HumanMessage
 
@@ -30,12 +31,15 @@ from ..llm.factory import make_llm
 from ..llm.spec import LLMSpec
 from ..sessions.store import SessionStore, new_thread_id, resolve_session_selector
 from .model_form import run_model_form
+from .local_state import touch_recent_model
 from .edit_history import EditTransaction, FileSnapshot, record_transaction, redo_last, undo_last
-from .mirage_compat import apply_command_template, load_custom_agents, load_custom_commands
+from .agent_registry import default_primary_agent, load_agent_registry
+from .mirage_compat import apply_command_template, load_custom_commands
 from .modes import BUILD_MODE, PLAN_MODE, policy_for_mode
 from .policy import get_policy, set_policy
 from .project_paths import find_project_root
 from .runtime_state import RuntimeSessionState, RuntimeSessionStore
+from .session_events import make_event
 from .render import (
     print_agent_message,
     print_config_form,
@@ -144,10 +148,25 @@ def _project_context_snapshot(root: Path) -> str:
     top_entries = sorted(root.iterdir(), key=lambda p: p.name.lower())
     top_names = [p.name for p in top_entries[:24]]
     stack = _detect_project_stack(root)
+    entries = ", ".join(top_names) if top_names else "(none)"
     return (
-        f"Project: {root.name}\n"
-        f"Stack: {stack}\n"
-        f"Top-level entries: {', '.join(top_names)}\n"
+        "- Project summary:\n"
+        f"  - Project name: {root.name}\n"
+        f"  - Detected stack: {stack}\n"
+        f"  - Working directory: {root}\n"
+        f"  - Top-level entries (sample): {entries}\n"
+    )
+
+
+def _inject_project_context(task: str, root: Path) -> str:
+    """Ensure every task includes a concise project context summary."""
+    context_block = _project_context_snapshot(root).strip()
+    return (
+        "Use this project context for all decisions.\n"
+        "Keep assumptions aligned with repository structure and stack.\n\n"
+        f"{context_block}\n\n"
+        "## User request\n"
+        f"{task}\n"
     )
 
 
@@ -572,6 +591,8 @@ def _on_change_runtime_state(new_state: RuntimeSessionState, old_state: RuntimeS
             provider=new_state.provider,
             model=new_state.model,
         )
+    if new_state.provider != old_state.provider or new_state.model != old_state.model:
+        touch_recent_model(new_state.provider, new_state.model)
 
 
 def create_runtime_session_store(
@@ -583,7 +604,7 @@ def create_runtime_session_store(
     session_name: str | None = None,
 ) -> RuntimeSessionStore:
     cfg, graph = _build_session_graph(provider, model)
-    mode = BUILD_MODE
+    mode = default_primary_agent().runtime_mode or BUILD_MODE
     initial = RuntimeSessionState(
         thread_id=thread_id,
         provider=provider,
@@ -594,6 +615,7 @@ def create_runtime_session_store(
         permission_policy=policy_for_mode(mode),
         cfg=cfg,
         graph=graph,
+        spec_driven_enabled=False,
     )
     return RuntimeSessionStore(
         initial_state=initial,
@@ -669,27 +691,6 @@ def open_model_configuration(session: RuntimeSessionStore, arg: str | None = Non
     print_status(f"✓ model · {new_state.provider}:{new_state.model}", "success")
 
 
-def enhance_user_prompt(raw_prompt: str, *, provider: str, model: str) -> str:
-    """Rewrite user input into a clearer execution-ready prompt."""
-    text = raw_prompt.strip()
-    if not text:
-        return raw_prompt
-    try:
-        enhanced = _llm_markdown_draft(
-            provider=provider,
-            model=model,
-            prompt=(
-                "Rewrite the user's request into a concise, execution-ready prompt for a coding agent.\n"
-                "Preserve intent and constraints. Do not add unrelated scope.\n"
-                "Output only the rewritten prompt text.\n\n"
-                f"User request:\n{text}\n"
-            ),
-        ).strip()
-        return enhanced or raw_prompt
-    except Exception:  # noqa: BLE001
-        return raw_prompt
-
-
 def handle_slash_command(raw: str, session: RuntimeSessionStore) -> bool:
     """Returns True if a slash command was handled (and should not be sent to the agent)."""
     if not raw.startswith("/"):
@@ -736,6 +737,7 @@ def handle_slash_command(raw: str, session: RuntimeSessionStore) -> bool:
                 prev,
                 mode=PLAN_MODE,
                 permission_policy=policy_for_mode(PLAN_MODE),
+                spec_driven_enabled=False,
             )
         )
         print_status(f"✓ created spec: {spec_path}", "success")
@@ -761,8 +763,32 @@ def handle_slash_command(raw: str, session: RuntimeSessionStore) -> bool:
                 prev,
                 mode=PLAN_MODE,
                 permission_policy=policy_for_mode(PLAN_MODE),
+                spec_driven_enabled=False,
             )
         )
+    if cmd == "/implement-spec":
+        root = find_project_root()
+        spec_path = _latest_spec_file(root)
+        if spec_path is None:
+            print_status("no spec found. create one first with /spec <title>", "error")
+            return True
+        plan_path = _latest_plan_file(root)
+        if plan_path is None:
+            print_status("no plan found. create one first with /plan <title>", "error")
+            return True
+        session.set_state(lambda prev: replace(prev, spec_driven_enabled=True, mode=BUILD_MODE, permission_policy=policy_for_mode(BUILD_MODE)))
+        print_status(f"✓ implementing from spec: {spec_path}", "success")
+        print_status(f"✓ using plan: {plan_path}", "info")
+        task = (arg or "Implement the active plan step-by-step.").strip()
+        current = session.get_state()
+        run_agent(
+            current.graph,
+            task,
+            current.thread_id,
+            session=session,
+        )
+        return True
+
         print_status(f"✓ created plan: {plan_path}", "success")
         print_status(f"source spec: {spec_path}", "info")
         print_status("mode switched to plan", "info")
@@ -936,21 +962,29 @@ def handle_slash_command(raw: str, session: RuntimeSessionStore) -> bool:
             )
             print_status(f"✓ active agent mode: {name}", "success")
             return True
-        agents = load_custom_agents()
+        agents = load_agent_registry()
         hit = agents.get(name)
         if not hit:
             print_status(f"agent not found: {name}", "error")
             return True
-        new_mode = (hit.mode or BUILD_MODE).strip().lower()
+        new_mode = (hit.runtime_mode or BUILD_MODE).strip().lower()
         if new_mode not in {BUILD_MODE, PLAN_MODE}:
             new_mode = BUILD_MODE
         session.set_state(
             lambda prev: replace(
                 prev,
                 mode=new_mode,
-                permission_policy=policy_for_mode(new_mode),
-                model=(hit.model.split("/", 1)[1] if hit.model and "/" in hit.model else prev.model),
-                provider=(hit.model.split("/", 1)[0] if hit.model and "/" in hit.model else prev.provider),
+                permission_policy=(hit.permission or policy_for_mode(new_mode)),
+                model=(
+                    hit.model.split("/", 1)[1]
+                    if hit.model and "/" in hit.model
+                    else prev.model
+                ),
+                provider=(
+                    hit.model.split("/", 1)[0]
+                    if hit.model and "/" in hit.model
+                    else prev.provider
+                ),
                 graph=None,
             )
         )
@@ -1173,13 +1207,13 @@ def handle_slash_command(raw: str, session: RuntimeSessionStore) -> bool:
         return True
 
     if cmd == "/agents":
-        agents = load_custom_agents()
+        agents = load_agent_registry()
         if not agents:
             print_status("no custom agents found in .mirage/agents", "info")
             return True
         for name, data in agents.items():
             print_status(
-                f"{name}: mode={data.mode or 'all'} model={data.model or '(default)'} permission={data.permission or '(mode default)'}",
+                f"{name}: mode={data.mode or 'all'} model={data.model or '(default)'} permission={'custom' if data.permission else '(mode default)'}",
                 "info",
             )
         return True
@@ -1194,9 +1228,14 @@ def run_agent(
     thread_id: str,
     session: RuntimeSessionStore | None = None,
     execution_policy: dict[str, str] | None = None,
+    event_callback: Callable[[object], None] | None = None,
 ) -> None:
     """Stream the runtime workflow autonomously."""
-    if session is not None:
+    project_root = find_project_root()
+    task = _inject_project_context(task, project_root)
+    used_spec_driven = False
+    if session is not None and session.get_state().spec_driven_enabled:
+        used_spec_driven = True
         st = session.get_state()
         try:
             task, spec_path, plan_path = _prepare_spec_driven_task(
@@ -1238,6 +1277,14 @@ def run_agent(
         ]
         print_status(f"[spec-driven] iterating {len(open_plan_items)} plan tasks", "info")
 
+    if event_callback:
+        event_callback(
+            make_event(
+                "session.status",
+                thread_id,
+                status="running",
+            )
+        )
     try:
         for task_idx, current_task in enumerate(iteration_tasks):
             last_sig: tuple[str, str] | None = None
@@ -1327,8 +1374,18 @@ def run_agent(
                 break
     finally:
         set_policy(previous_policy)
+        if event_callback:
+            event_callback(
+                make_event(
+                    "session.status",
+                    thread_id,
+                    status="idle",
+                )
+            )
     if session is not None:
         session.get_state().session_store.touch(thread_id)
+        if used_spec_driven:
+            session.set_state(lambda prev: replace(prev, spec_driven_enabled=False))
     if touched_files_before:
         snapshots: list[FileSnapshot] = []
         for path, (before_exists, before_content) in touched_files_before.items():

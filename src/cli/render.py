@@ -171,6 +171,7 @@ def show_help() -> None:
         ("/init", "create AGENTS.md scaffold"),
         ("/spec [title]", "create .mirage/specs/<title>.md and switch to plan mode"),
         ("/plan [title]", "create .mirage/plans/<title>.md and switch to plan mode"),
+        ("/implement-spec [task]", "run spec-driven implementation from latest spec+plan"),
         ("/clear", "clear the screen"),
         ("/reset", "alias · start a new session"),
         ("/new [name]", "create a new chat session"),

@@ -7,9 +7,9 @@ This matrix tracks Mirage CLI/TUI parity behaviors.
 | Mirage command | Status | Notes |
 |---|---|---|
 | `mirage` (default TUI) | Implemented | Defaults to chat. |
-| `mirage run` | Implemented | Extended flags available (`--session`, `--continue`, `--fork`, `--file`, `--format`, `--title`, `--agent`, `--attach`) with mode policy support. |
+| `mirage run` | Implemented | Extended flags available (`--session`, `--continue`, `--fork`, `--file`, `--format`, `--title`, `--agent`, `--attach`) with parity validation (`--fork` requires session context), auto session creation, and JSON event output. |
 | `mirage models [provider]` | Implemented | Root `models` behavior plus `models list`. |
-| `mirage session list/delete` | Implemented | `session` aliases `sessions`. |
+| `mirage session list/delete` | Implemented | `session` aliases `sessions`; parity extensions include `session list --format json` and `session fork`. |
 | `mirage export` / `import` | Implemented | Session export/import commands available. |
 | `mirage stats` | Implemented (local) | Local session index stats scaffold. |
 | `mirage auth login/list/logout` | Implemented | Uses Mirage provider key config. |
@@ -35,7 +35,7 @@ This matrix tracks Mirage CLI/TUI parity behaviors.
 | `/share` / `/unshare` | Implemented (local) | Local share files under `.mirage/shares`. |
 | `/themes` | Implemented (list) | Lists available Mirage themes. |
 | `/mode` | Implemented | Switches runtime mode (`build`/`plan`) with permission policy updates. |
-| `/agent` | Implemented | Selects built-in/custom agent profile affecting mode/model behavior. |
+| `/agent` | Implemented | Selects built-in/custom agent profile via registry (`primary`/`subagent`) and merged permission policy. |
 
 ## Config compatibility
 
@@ -45,6 +45,7 @@ This matrix tracks Mirage CLI/TUI parity behaviors.
 | `.mirage/commands/*.md` | Implemented | Loaded as custom slash commands. |
 | `.mirage/agents/*.md` | Implemented | Parsed for metadata and used by `/agent` profile switching. |
 | env-based config override | Implemented (partial) | Added `MIRAGE_CONFIG_PATH` and `MIRAGE_CONFIG_CONTENT` support. |
+| local model state (`recent`/`favorite`/`variant`) | Implemented (partial) | Stored under `~/.mirage/model_state.json`; runtime currently updates recents. |
 | project scaffold bootstrap | Implemented | `mirage` auto-creates `.mirage/agents` and `.mirage/commands` in project runs. |
 
 ## Non-goals in this pass

@@ -21,6 +21,7 @@ class RuntimeSessionState:
     permission_policy: dict[str, str]
     cfg: object
     graph: object
+    spec_driven_enabled: bool = False
 
 
 Listener = Callable[[], None]
@@ -97,6 +98,7 @@ def with_state(
     permission_policy: dict[str, str] | None = None,
     cfg: object | None = None,
     graph: object | None = None,
+    spec_driven_enabled: bool | None = None,
 ) -> RuntimeSessionState:
     """Convenience helper for immutable updates with optional field overrides."""
     return replace(
@@ -112,4 +114,9 @@ def with_state(
         ),
         cfg=cfg if cfg is not None else state.cfg,
         graph=graph if graph is not None else state.graph,
+        spec_driven_enabled=(
+            spec_driven_enabled
+            if spec_driven_enabled is not None
+            else state.spec_driven_enabled
+        ),
     )

@@ -13,11 +13,17 @@ MODE_POLICIES: dict[str, Policy] = {
         "edit": "allow",
         "bash": "allow",
         "read": "allow",
+        "question": "allow",
+        "plan_enter": "allow",
+        "plan_exit": "deny",
     },
     PLAN_MODE: {
-        "edit": "ask",
+        "edit": "deny",
         "bash": "ask",
         "read": "allow",
+        "question": "allow",
+        "plan_enter": "deny",
+        "plan_exit": "allow",
     },
 }
 
