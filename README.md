@@ -1,13 +1,14 @@
-# MIRAGE 5 CLI
+# MIRAGE  CLI
 
-Mirage is a terminal-first, multi-agent CLI built with LangGraph, Typer, Rich, and prompt_toolkit.
+Mirage is an open-source coding agent CLI, similar in spirit to Claude-style terminal agents, built on top of **LangChain** and **LangGraph**.
+
 
 It runs a 3-agent product team:
 - `ProjectManager` (planning, read-only)
 - `UXUIDesigner` (UI/UX specification, read-only)
 - `Developer` (the only code-writing agent)
 
-The interface is themed as **MIRAGE 5** (Jordanian military palette + aviation styling), but the core is a practical autonomous coding workflow.
+The interface is themed as **MIRAGE** (Jordanian military palette + aviation styling), but the core is a practical autonomous coding workflow.
 
 ---
 
