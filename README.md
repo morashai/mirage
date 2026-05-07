@@ -18,8 +18,11 @@ It runs a 3-agent product team:
 - Multi-agent orchestration via LangGraph supervisor routing
 - Interactive chat mode with a bordered prompt input box
 - Non-interactive single-task mode
-- Thread-aware memory (via LangGraph checkpointer)
-- Slash commands for session control (`/help`, `/thread`, `/model`, etc.)
+- Thread-aware **persisted** memory (SQLite checkpointer under `~/.mirage/sessions.db`)
+- Multi-provider models (**OpenAI**, **Anthropic**, **Google Gemini**) via LangChain `init_chat_model`
+- Terminal **model form** for API key + base URL when configuring `/model`
+- Session index (`~/.mirage/sessions.json`) — list, switch, rename, delete sessions from chat or CLI
+- Slash commands for session + model control (`/help`, `/sessions`, `/session`, `/model`, …)
 - Deduplicated Claude-style core toolset for filesystem, shell, search, git, web, notebook, and MCP descriptor discovery
 - Installable package with console scripts:
   - `mirage`
@@ -55,8 +58,10 @@ Intentionally skipped in this pass:
 ## Requirements
 
 - Python `>=3.11`
-- An OpenAI-compatible API key in environment:
-  - `OPENAI_API_KEY`
+- At least one LLM provider credential (environment variable **or** saved in `~/.mirage/config.json`):
+  - OpenAI: `OPENAI_API_KEY`
+  - Anthropic: `ANTHROPIC_API_KEY`
+  - Google Gemini: `GOOGLE_API_KEY` or `GEMINI_API_KEY`
 
 Optional tools:
 - `uv` (recommended for fast dependency management)
@@ -74,6 +79,13 @@ Optional tools:
 └─ src/
    ├─ __main__.py           # supports python -m and uv run .\src\
    ├─ config.py
+   ├─ config_store.py      # ~/.mirage/config.json
+   ├─ llm/
+   │  ├─ catalog.py        # curated model ids
+   │  ├─ factory.py        # init_chat_model wrapper
+   │  └─ spec.py
+   ├─ sessions/
+   │  └─ store.py          # sessions.json index + checkpoint deletes
    ├─ theme.py
    ├─ tools/
    │  ├─ catalog.py
@@ -92,6 +104,7 @@ Optional tools:
    │  └─ ...
    └─ cli/
       ├─ app.py
+      ├─ model_form.py      # prompt_toolkit configuration form
       ├─ session.py
       ├─ input_box.py
       └─ render.py
@@ -179,8 +192,7 @@ python main.py --help
 uv run .\src\ --help
 ```
 
-> Note: `uv run mirage` with no subcommand will show "Missing command."  
-Use `mirage chat` or `mirage run "task"`.
+> Installed entrypoints (`mirage` / `mirage-cli` via `mirage_cli.py`) default to **`chat`** when no subcommand is given.
 
 ---
 
@@ -193,13 +205,19 @@ mirage chat
 ```
 
 Options:
-- `--thread-id TEXT` (optional; auto-generated if omitted)
-- `--model TEXT` (defaults to `MIRAGE_CLI_MODEL` env or fallback model)
 
-Example:
+- `--thread-id`, `-t` — LangGraph thread id (conversation key)
+- `--session-id`, `-s` — resume by thread id listed in `~/.mirage/sessions.json`
+- `--model`, `-m` — model id (free-form; curated lists are helpers only)
+- `--provider`, `-p` — `openai` | `anthropic` | `google`
+
+On startup (TTY only), Mirage may prompt to **resume the most recent saved session**.
+
+Examples:
 
 ```bash
-mirage chat --model gpt-4o
+mirage chat --provider anthropic --model claude-sonnet-4-5
+mirage chat --session-id session-a1b2c3d4
 ```
 
 ### One-shot mode
@@ -209,39 +227,78 @@ mirage run "build a hello world FastAPI app"
 ```
 
 Options:
-- `--thread-id TEXT` (default: `multi-agent-session-1`)
-- `--model TEXT`
+
+- `--thread-id` (default: `multi-agent-session-1`)
+- `--model`, `-m`
+- `--provider`, `-p`
+
+### Terminal commands (outside chat)
+
+```bash
+mirage models list [--provider openai|anthropic|google]
+
+mirage config show
+mirage config set-key <provider> <api-key>
+mirage config set-url <provider> <url>
+mirage config set-default <provider> <model-id>
+
+mirage sessions list
+mirage sessions new [name]
+mirage sessions delete <thread-id-or-index>
+```
 
 ---
 
 ## Slash commands (inside chat)
 
-- `/help` — show command help
+- `/help` — cockpit help
 - `/clear` — clear terminal and repaint welcome panel
-- `/reset` — create a new thread id
-- `/thread [id]` — show or switch active thread
-- `/model [name]` — show or switch model (rebuilds graph)
+- `/new [name]`, `/reset` — new session (new thread id + index entry)
+- `/sessions` — table of saved sessions
+- `/session <id|#>` — switch session (loads provider/model from index)
+- `/rename <name>` — rename current session in the index
+- `/delete <id|#>` — delete session metadata + SQLite checkpoints for that thread
+- `/thread [id]` — show or set raw thread id (advanced)
+- `/model [name]` — open **model form** (`provider:model` or bare model id)
+- `/provider [name]` — same form, pre-select provider
+- `/config` — read-only configuration panels (masked keys)
+- `/config edit` — open the model form pre-filled
+- `/models [provider]` — print curated model ids
 - `/exit`, `/quit` — exit
 
 ---
 
 ## Configuration
 
-`src/config.py` loads environment via `python-dotenv`.
+Environment is loaded via `python-dotenv` from the current working directory.
 
-Supported env vars:
+### Files
 
-- `OPENAI_API_KEY` — required for model calls
-- `MIRAGE_CLI_MODEL` — default model for commands (default in code)
-- `MIRAGE_CLI_RECURSION_LIMIT` — LangGraph recursion limit (default: `75`)
+| File | Purpose |
+|------|---------|
+| `~/.mirage/config.json` | Per-provider `api_key`, `base_url`, plus default provider/model |
+| `~/.mirage/sessions.json` | Session index (name, thread id, provider, model, timestamps) |
+| `~/.mirage/sessions.db` | LangGraph SQLite checkpoints (actual message history) |
+
+On first run, Mirage may copy API keys from the environment into `config.json` so the CLI works offline from dotfiles.
+
+### Environment variables
+
+- `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `GOOGLE_API_KEY` / `GEMINI_API_KEY` — used when not overridden in `config.json`
+- `MIRAGE_CLI_MODEL` — seed default model when creating `config.json`
+- `MIRAGE_CLI_RECURSION_LIMIT` — LangGraph recursion limit (default `75`)
 
 PowerShell example:
 
-```bash
+```powershell
 $env:OPENAI_API_KEY="..."
-$env:MIRAGE_CLI_MODEL="gpt-4o"
+$env:MIRAGE_CLI_MODEL="gpt-4.1-mini"
 $env:MIRAGE_CLI_RECURSION_LIMIT="75"
 ```
+
+### Curated model ids
+
+Mirage ships shortcut lists for common ids under **openai**, **anthropic**, and **google** (`mirage models list`). Any provider-supported model string still works if you type it manually.
 
 ---
 
@@ -252,8 +309,8 @@ $env:MIRAGE_CLI_RECURSION_LIMIT="75"
 - Build backend: `setuptools.build_meta`
 - Distribution name: `mirage-cli`
 - Console scripts:
-  - `mirage = "src.cli.app:main"`
-  - `mirage-cli = "src.cli.app:main"`
+  - `mirage = "mirage_cli:main"` (defaults to `chat` when no args)
+  - `mirage-cli = "mirage_cli:main"`
 
 This enables installation via `pip`, `uv`, `pipx`, and execution through `uvx --from .`.
 
@@ -314,13 +371,7 @@ uvx --from . mirage --help
 
 ### `Missing command` when running `mirage`
 
-This is expected without a subcommand. Use:
-
-```bash
-mirage chat
-# or
-mirage run "your task"
-```
+The PyPI console script uses `mirage_cli.py`, which injects `chat` when no args are passed. If you invoke `python -m src.cli.app` directly with **zero** arguments, Typer may print “Missing command” — use `python -m src` or pass `chat` explicitly.
 
 ### `ModuleNotFoundError: No module named 'src'` when running `mirage`
 

@@ -13,6 +13,7 @@ To add a new worker agent:
 """
 from __future__ import annotations
 
+import sqlite3
 import warnings
 
 from langchain_core._api.deprecation import LangChainPendingDeprecationWarning
@@ -28,10 +29,12 @@ warnings.filterwarnings(
 )
 
 from langchain_core.messages import AIMessage
-from langchain_openai import ChatOpenAI
-from langgraph.checkpoint.memory import InMemorySaver
+from langgraph.checkpoint.sqlite import SqliteSaver
 from langgraph.graph import END, START, StateGraph
 
+from ..config_store import MirageConfig, load_config, resolve_api_key, resolve_base_url
+from ..llm.factory import make_llm
+from ..llm.spec import LLMSpec
 from ..tools import DEVELOPER_TOOLS, READ_ONLY_TOOLS
 from .developer import build_developer
 from .factory import make_node
@@ -40,15 +43,30 @@ from .state import AgentState, MEMBERS
 from .supervisor import build_supervisor_chain
 from .ux_ui_designer import build_ux_ui_designer
 
+_sqlite_checkpointer: SqliteSaver | None = None
+_sqlite_conn: sqlite3.Connection | None = None
 
-def _build_agents(model_name: str):
+
+def _get_sqlite_checkpointer() -> SqliteSaver:
+    """Process-wide SQLite checkpointer (persists all ``thread_id`` threads)."""
+    global _sqlite_checkpointer, _sqlite_conn
+    if _sqlite_checkpointer is None:
+        from ..config_store import sessions_db_path
+
+        path = sessions_db_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        _sqlite_conn = sqlite3.connect(str(path), check_same_thread=False)
+        _sqlite_checkpointer = SqliteSaver(_sqlite_conn)
+        _sqlite_checkpointer.setup()
+    return _sqlite_checkpointer
+
+
+def _build_agents(llm):
     """Instantiate every agent + the supervisor and return them as nodes.
 
     Returns a dict keyed by graph node name (matching ``MEMBERS`` plus
     ``"supervisor"``) so ``build_graph`` can wire them up directly.
     """
-    llm = ChatOpenAI(model=model_name)
-
     pm_tools = list(READ_ONLY_TOOLS)
     project_manager_agent = build_project_manager(llm, pm_tools)
 
@@ -88,9 +106,35 @@ def _build_agents(model_name: str):
     }
 
 
-def build_graph(model_name: str = "gpt-4o"):
-    """Compile the multi-agent ``StateGraph`` with an in-memory checkpointer."""
-    nodes = _build_agents(model_name)
+def build_graph(
+    model_name: str | None = None,
+    *,
+    llm_spec: LLMSpec | None = None,
+    provider: str | None = None,
+    cfg: MirageConfig | None = None,
+):
+    """Compile the multi-agent ``StateGraph`` with a SQLite checkpointer.
+
+    ``model_name`` is kept for backward compatibility; when ``llm_spec`` is
+    omitted, it is combined with ``provider`` (or configured default).
+    """
+    cfg = cfg or load_config()
+    if llm_spec is None:
+        llm_spec = LLMSpec(
+            provider=provider or cfg.default_provider,
+            model=model_name or cfg.default_model,
+        )
+
+    api_key = resolve_api_key(cfg, llm_spec.provider)
+    base_url = resolve_base_url(cfg, llm_spec.provider)
+    llm = make_llm(
+        llm_spec.provider,
+        llm_spec.model,
+        api_key=api_key,
+        base_url=base_url,
+    )
+
+    nodes = _build_agents(llm)
 
     workflow = StateGraph(AgentState)
     for member in MEMBERS:
@@ -111,5 +155,5 @@ def build_graph(model_name: str = "gpt-4o"):
     )
     workflow.add_edge(START, "supervisor")
 
-    memory = InMemorySaver()
+    memory = _get_sqlite_checkpointer()
     return workflow.compile(checkpointer=memory)

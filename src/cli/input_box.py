@@ -33,7 +33,7 @@ PT_STYLE = PTStyle.from_dict(
 )
 
 
-def _prompt_input_box(thread_id: str, model: str) -> str | None:
+def _prompt_input_box(thread_id: str, model: str, provider: str | None = None) -> str | None:
     """Render the bordered, multiline input box and return the submitted text.
 
     Returns None if the user cancels (Ctrl+C / Ctrl+D on empty buffer).
@@ -100,7 +100,10 @@ def _prompt_input_box(thread_id: str, model: str) -> str | None:
             ("class:toolbar.sep", "·  "),
             ("class:toolbar", "thread "),
             ("class:toolbar.key", f"{thread_id}"),
-            ("class:toolbar", f"   {model}"),
+            (
+                "class:toolbar",
+                f"   {provider + ' · ' if provider else ''}{model}",
+            ),
         ]
 
     toolbar = Window(

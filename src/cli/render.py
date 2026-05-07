@@ -19,6 +19,9 @@ from rich.text import Text
 from rich import box
 
 from ..agents.state import MEMBERS
+from ..config_store import MirageConfig, mask_secret
+from ..llm.catalog import DEFAULT_BASE_URLS, PROVIDERS, list_models_for_provider
+from ..sessions.store import SessionRecord
 from ..theme import (
     ACCENT,
     AGENT_COLORS,
@@ -76,7 +79,7 @@ def _mirage_title() -> Text:
     return title
 
 
-def print_welcome(thread_id: str, model: str) -> None:
+def print_welcome(thread_id: str, model: str, provider: str | None = None) -> None:
     """Render the Mirage 5 welcome banner.
 
     Layout (colors apply in a real terminal):
@@ -109,9 +112,11 @@ def print_welcome(thread_id: str, model: str) -> None:
     body.append("/quit", style=f"bold {ACCENT}")
     body.append(" to exit\n", style="default")
 
-    body.append(f"   cwd     {os.getcwd()}\n", style=MUTED)
-    body.append(f"   model   {model}\n", style=MUTED)
-    body.append(f"   thread  {thread_id}\n", style=MUTED)
+    body.append(f"   cwd      {os.getcwd()}\n", style=MUTED)
+    if provider:
+        body.append(f"   provider {provider}\n", style=MUTED)
+    body.append(f"   model    {model}\n", style=MUTED)
+    body.append(f"   thread   {thread_id}\n", style=MUTED)
 
     body.append("\n   Strike package:\n", style="default")
     for member in MEMBERS:
@@ -190,9 +195,18 @@ def show_help() -> None:
     rows = [
         ("/help", "show this help"),
         ("/clear", "clear the screen"),
-        ("/reset", "start a new conversation thread"),
-        ("/thread [id]", "show or switch the active thread"),
-        ("/model  [name]", "show or switch the LLM model"),
+        ("/reset", "alias · start a new session"),
+        ("/new [name]", "create a new chat session"),
+        ("/sessions", "list saved sessions"),
+        ("/session <id|#>", "switch session"),
+        ("/rename <name>", "rename current session"),
+        ("/delete <id|#>", "delete a session"),
+        ("/thread [id]", "show or switch raw thread id"),
+        ("/model [name]", "model & API configuration form"),
+        ("/provider [name]", "same form · pre-select provider"),
+        ("/config", "show configuration form"),
+        ("/config edit", "edit configuration"),
+        ("/models [provider]", "list curated model ids"),
         ("/exit, /quit", "RTB · exit the CLI"),
         ("", ""),
         ("Enter", "transmit · submit message"),
@@ -213,4 +227,79 @@ def show_help() -> None:
     )
     console.print()
     console.print(panel)
+    console.print()
+
+
+def print_models_table(provider: str | None = None) -> None:
+    """Print curated model ids as a Rich table."""
+    table = Table(title="Curated models", box=box.ROUNDED, header_style=f"bold {ACCENT}")
+    table.add_column("Provider", style=MUTED)
+    table.add_column("Model id", style="default")
+
+    provs = [provider] if provider in PROVIDERS else list(PROVIDERS)
+    for p in provs:
+        for m in list_models_for_provider(p):
+            table.add_row(p, m)
+
+    console.print()
+    console.print(table)
+    console.print()
+
+
+def print_sessions_table(rows: list[SessionRecord], *, active_id: str | None = None) -> None:
+    """List saved sessions (most recent first)."""
+    table = Table(title="Chat sessions", box=box.ROUNDED, header_style=f"bold {ACCENT}")
+    table.add_column("#", justify="right", style=MUTED)
+    table.add_column("Name")
+    table.add_column("Thread")
+    table.add_column("Provider / model", style=MUTED)
+    table.add_column("Last active", style=MUTED)
+
+    for i, r in enumerate(rows, start=1):
+        mark = "● " if active_id and r.thread_id == active_id else ""
+        table.add_row(
+            str(i),
+            f"{mark}{r.name}",
+            r.thread_id,
+            f"{r.provider}:{r.model}",
+            r.last_active_at[:19] if r.last_active_at else "",
+        )
+
+    console.print()
+    console.print(table)
+    console.print()
+
+
+def print_config_form(cfg: MirageConfig, *, active_provider: str | None = None) -> None:
+    """Render stored provider keys and URLs as a read-only form."""
+    console.print()
+    for prov in PROVIDERS:
+        st = cfg.provider_settings(prov)
+        header_style = f"bold {ACCENT}" if prov == active_provider else SUBTLE
+        tbl = Table(show_header=False, box=box.HEAVY_EDGE, padding=(0, 2), expand=False)
+        tbl.add_column("Field", style=MUTED, no_wrap=True)
+        tbl.add_column("Value", style="default")
+
+        def_url = DEFAULT_BASE_URLS.get(prov, "") or "(SDK default)"
+        tbl.add_row("API key", mask_secret(st.api_key))
+        url_disp = (
+            str(st.base_url).strip()
+            if st.base_url and str(st.base_url).strip()
+            else f"(not set — default {def_url})"
+        )
+        tbl.add_row("Base URL", url_disp)
+
+        title = Text()
+        title.append(prov.upper(), style=header_style)
+        if prov == active_provider:
+            title.append("  (active)", style=SUCCESS)
+
+        console.print(Panel(tbl, title=title, border_style=header_style, expand=False))
+
+    foot = Table(show_header=False, box=None, padding=(0, 2))
+    foot.add_column(style=MUTED)
+    foot.add_column(style="default")
+    foot.add_row("Default provider", cfg.default_provider)
+    foot.add_row("Default model", cfg.default_model)
+    console.print(Panel(foot, title="Defaults", border_style=SUBTLE, expand=False))
     console.print()

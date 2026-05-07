@@ -10,7 +10,9 @@ Developer is the only code-writer).
 from __future__ import annotations
 
 import os as _os
+import tempfile
 import time
+from pathlib import Path
 
 from prompt_toolkit.application import create_app_session
 from prompt_toolkit.input import create_pipe_input
@@ -144,31 +146,21 @@ def test_only_developer_writes_code() -> None:
     """Only the Developer agent may have write_file / edit_file tools.
     Designer + ProjectManager must be read-only.
     """
-    _os.environ.setdefault("OPENAI_API_KEY", "sk-test-not-called")
+    from src.tools import DEVELOPER_TOOLS, READ_ONLY_TOOLS
+
+    write_tools = {"write_file", "edit_file"}
+    read_names = {t.name for t in READ_ONLY_TOOLS}
+    dev_names = {t.name for t in DEVELOPER_TOOLS}
+
+    for tool in write_tools:
+        assert tool not in read_names, f"read-only toolset must not include {tool}"
+
+    for tool in write_tools:
+        assert tool in dev_names, f"Developer toolset must include {tool}"
 
     import inspect
+
     source = inspect.getsource(main._build_agents)
-
-    write_tools = ("write_file", "edit_file")
-
-    def section_for(agent_var: str) -> str:
-        marker = f"{agent_var}_tools = ["
-        i = source.index(marker)
-        end = source.index("]", i)
-        return source[i:end + 1]
-
-    pm_section = section_for("pm")
-    designer_section = section_for("designer")
-    developer_section = section_for("developer")
-
-    for tool in write_tools:
-        assert tool not in pm_section, f"ProjectManager must be read-only but has {tool}"
-        assert tool not in designer_section, f"UXUIDesigner must be read-only but has {tool}"
-
-    for tool in write_tools:
-        assert tool in developer_section, f"Developer must have {tool} (sole code-writer)"
-
-    # Executor must be gone entirely — no executor_tools section should exist.
     assert "executor_tools = [" not in source, "Executor tool wiring should be removed"
 
     print("PASS: only Developer has write_file / edit_file tools")
@@ -179,13 +171,27 @@ def test_only_developer_writes_code() -> None:
 
 
 def test_slash_commands() -> None:
-    session = {"thread_id": "abc", "model": "gpt-4o", "graph": FakeGraph()}
+    from unittest.mock import patch
 
-    handled = main.handle_slash_command("/thread newthread", session)
+    from src.sessions.store import SessionStore
+
+    idx_path = Path(tempfile.mkdtemp()) / "sessions.json"
+    session = {
+        "thread_id": "abc",
+        "model": "gpt-4o",
+        "provider": "openai",
+        "session_name": "abc",
+        "session_store": SessionStore(path=idx_path),
+        "graph": FakeGraph(),
+    }
+
+    with patch("src.cli.session.refresh_session_graph", lambda _s: None):
+        handled = main.handle_slash_command("/thread newthread", session)
     assert handled and session["thread_id"] == "newthread"
     print("PASS: /thread switches thread:", session["thread_id"])
 
-    handled = main.handle_slash_command("/reset", session)
+    with patch("src.cli.session.refresh_session_graph", lambda _s: None):
+        handled = main.handle_slash_command("/reset", session)
     assert handled and session["thread_id"].startswith("session-")
     print("PASS: /reset generates new thread:", session["thread_id"])
 
