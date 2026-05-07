@@ -51,9 +51,7 @@ from .modes import BUILD_MODE, PLAN_MODE, policy_for_mode
 
 app = typer.Typer(
     help=(
-        "MIRAGE 5 — multi-agent strike package, dressed in Royal Jordanian colors. "
-        "A LangGraph delta-wing for product work: Project Manager (OPS), "
-        "UX/UI Designer (Recce), Developer (Strike)."
+        "MIRAGE 5 — CLI with Build/Plan primary agent behavior."
     ),
     add_completion=False,
 )
@@ -435,7 +433,7 @@ def _start_chat(
                 task_queue.task_done()
                 break
             try:
-                print_status("[WORKING] Mirage agents are running...", "working")
+                print_status("[WORKING] Mirage agent is running...", "working")
                 current_state = session.get_state()
                 run_agent(
                     current_state.graph,
@@ -448,7 +446,7 @@ def _start_chat(
             except Exception as e:  # noqa: BLE001
                 print_status(f"error: {e}", "error")
             finally:
-                print_status("[IDLE] Mirage agents finished.", "idle")
+                print_status("[IDLE] Mirage agent finished.", "idle")
                 task_queue.task_done()
 
     worker_thread = threading.Thread(
@@ -528,14 +526,14 @@ def chat(
         help="Provider key: openai | anthropic | google.",
     ),
 ):
-    """Start an interactive chat session with the multi-agent system."""
+    """Start an interactive chat session."""
     _start_chat(thread_id, session_id, model, provider)
 
 
 @app.command()
 def run(
     task: str,
-    thread_id: str = typer.Option("multi-agent-session-1", help="Thread ID for memory."),
+    thread_id: str = typer.Option("mirage-session-1", help="Thread ID for memory."),
     model: str | None = typer.Option(None, help="LLM model name."),
     provider: str | None = typer.Option(None, help="openai | anthropic | google"),
     continue_last: bool = typer.Option(

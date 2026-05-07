@@ -1,4 +1,4 @@
-"""Typed LLM selection passed into the multi-agent graph."""
+"""Typed LLM selection passed into the runtime graph."""
 from __future__ import annotations
 
 from dataclasses import dataclass

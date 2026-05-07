@@ -1,4 +1,4 @@
-"""src — Mirage, a multi-agent LangGraph CLI.
+"""src — Mirage LangGraph CLI.
 
 Public surface re-exported for convenient imports:
 
@@ -11,7 +11,7 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from .agents.state import AgentState
 
-__all__ = ["app", "build_graph", "AgentState", "MEMBERS", "ROUTE_OPTIONS"]
+__all__ = ["app", "build_graph", "AgentState", "MEMBERS"]
 
 
 def __getattr__(name: str):
@@ -23,13 +23,12 @@ def __getattr__(name: str):
         from .agents.graph import build_graph
 
         return build_graph
-    if name in {"AgentState", "MEMBERS", "ROUTE_OPTIONS"}:
-        from .agents.state import AgentState, MEMBERS, ROUTE_OPTIONS
+    if name in {"AgentState", "MEMBERS"}:
+        from .agents.state import AgentState, MEMBERS
 
         mapping = {
             "AgentState": AgentState,
             "MEMBERS": MEMBERS,
-            "ROUTE_OPTIONS": ROUTE_OPTIONS,
         }
         return mapping[name]
     raise AttributeError(f"module 'src' has no attribute {name!r}")

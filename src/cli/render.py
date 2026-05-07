@@ -1,12 +1,4 @@
-"""Rich-based rendering for the Mirage 5 CLI.
-
-The visual language is a Royal Jordanian Air Force overlay on the Mirage 5
-silhouette: an aircraft roundel as the brand mark, a flight of three jets
-in Jordanian flag colors (black/white/green/red), and a "strike package"
-framing for the agent roster. Every renderer writes to the shared
-``console`` from ``theme.py`` so output stays in lockstep with the
-prompt_toolkit input box and the spinner.
-"""
+"""Rich-based rendering for the Mirage 5 CLI."""
 from __future__ import annotations
 
 import os
@@ -34,17 +26,13 @@ from ..theme import (
     MUTED,
     SUBTLE,
     SUCCESS,
-    SUPERVISOR_COLOR,
     console,
 )
 
 
-# Each member of the strike package gets a one-liner that nods to its role
-# in an air-to-ground sortie while still describing its real job.
 _TEAM_TAGLINES: dict[str, str] = {
-    "ProjectManager": "OPS — plans the mission",
-    "UXUIDesigner":   "Recce — UI/UX spec, hands off",
-    "Developer":      "Strike — flies the code",
+    "Build": "primary agent — implementation and execution",
+    "Plan": "primary agent — analysis with restricted actions",
 }
 
 
@@ -85,24 +73,22 @@ def print_welcome(thread_id: str, model: str, provider: str | None = None) -> No
     Layout (colors apply in a real terminal):
 
         ◎  MIRAGE 5
-            ✈ ✈ ✈ ✈   multi-agent strike package · LangGraph
+            ✈ ✈ ✈ ✈   Mirage primary agent runtime · LangGraph
 
             /help for help, /quit to exit
             cwd     <path>
             model   <model>
             thread  <thread>
 
-            Strike package:
-              ▣  Project Manager — OPS — plans the mission
-              ◈  UX/UI Designer  — Recce — UI/UX spec, hands off
-              ▲  Developer       — Strike — flies the code
+            Active agents:
+              ▲  Build — primary agent — implementation and execution
     """
     title = _mirage_title()
 
     body = Text()
     body.append("\n   ")
     body.append(_jordan_formation())
-    body.append("   multi-agent strike package", style=MUTED)
+    body.append("   Mirage primary agents", style=MUTED)
     body.append(" · ", style=SUBTLE)
     body.append("LangGraph", style=MUTED)
     body.append("\n\n")
@@ -118,12 +104,12 @@ def print_welcome(thread_id: str, model: str, provider: str | None = None) -> No
     body.append(f"   model    {model}\n", style=MUTED)
     body.append(f"   thread   {thread_id}\n", style=MUTED)
 
-    body.append("\n   Strike package:\n", style="default")
+    body.append("\n   Active agents:\n", style="default")
     for member in MEMBERS:
         color = AGENT_COLORS[member]
         glyph = AGENT_GLYPHS[member]
         display = AGENT_DISPLAY_NAMES[member]
-        tagline = _TEAM_TAGLINES[member]
+        tagline = _TEAM_TAGLINES.get(member, "custom agent")
         body.append(f"     {glyph}  ", style=f"bold {color}")
         body.append(f"{display:<16}", style=color)
         body.append(f"— {tagline}\n", style=MUTED)
@@ -152,22 +138,6 @@ def print_agent_message(name: str, content: str) -> None:
     console.print()
     console.print(header)
     console.print(Padding(Markdown(content or "*(no content)*"), (0, 0, 0, 2)))
-
-
-def print_supervisor_routing(target: str) -> None:
-    """Render the supervisor's routing decision as an AWACS tasking line."""
-    text = Text()
-    text.append("  ⎿ ", style=MUTED)
-    text.append("◎ Flight Lead → ", style=f"italic {SUPERVISOR_COLOR}")
-    if target == "FINISH":
-        text.append("RTB", style=f"italic {MUTED}")
-    else:
-        target_color = AGENT_COLORS.get(target, SUPERVISOR_COLOR)
-        target_display = AGENT_DISPLAY_NAMES.get(target, target)
-        target_glyph = AGENT_GLYPHS.get(target, "●")
-        text.append(f"{target_glyph} ", style=f"italic bold {target_color}")
-        text.append(target_display, style=f"italic bold {target_color}")
-    console.print(text)
 
 
 def print_status(message: str, kind: str = "info") -> None:

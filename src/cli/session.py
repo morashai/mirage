@@ -1,4 +1,4 @@
-"""Slash-command dispatcher and the multi-agent stream loop."""
+"""Slash-command dispatcher and runtime stream loop."""
 from __future__ import annotations
 
 import os
@@ -40,7 +40,6 @@ from .render import (
     print_models_table,
     print_sessions_table,
     print_status,
-    print_supervisor_routing,
     print_welcome,
     show_help,
 )
@@ -88,6 +87,46 @@ def _parse_flag_map(arg: str | None) -> tuple[list[str], dict[str, list[str]]]:
             positionals.append(tok)
         i += 1
     return positionals, flags
+
+
+def _detect_project_stack(root: Path) -> str:
+    if (root / "pyproject.toml").is_file() or (root / "requirements.txt").is_file():
+        return "Python"
+    if (root / "package.json").is_file():
+        return "Node.js"
+    if (root / "Cargo.toml").is_file():
+        return "Rust"
+    if (root / "go.mod").is_file():
+        return "Go"
+    return "Unknown"
+
+
+def _init_agents_md(root: Path) -> tuple[Path, str]:
+    target = root / "AGENTS.md"
+    stack = _detect_project_stack(root)
+    project_name = root.name
+    section = (
+        "## Mirage Project Instructions\n"
+        f"- Project: {project_name}\n"
+        f"- Stack: {stack}\n"
+        "- Follow existing repository conventions before introducing new patterns.\n"
+        "- Keep changes minimal and scoped to the request.\n"
+        "- Run targeted tests/lint for touched areas when feasible.\n"
+        "- For risky changes, explain assumptions and validation steps clearly.\n"
+    )
+    if target.exists():
+        existing = target.read_text(encoding="utf-8")
+        if "## Mirage Project Instructions" in existing:
+            return target, "already-configured"
+        target.write_text(existing.rstrip() + "\n\n" + section + "\n", encoding="utf-8")
+        return target, "updated"
+    seed = (
+        "# AGENTS\n\n"
+        "Project-specific instructions for Mirage agent behavior.\n\n"
+        f"{section}\n"
+    )
+    target.write_text(seed, encoding="utf-8")
+    return target, "created"
 
 
 def _classify_tool_action(tool_name: str) -> str:
@@ -245,7 +284,7 @@ def _emit_live_message_events(
         if msg_type in {"ai", "assistant"}:
             # Only render substantive assistant turns, skip pure tool-call wrappers.
             if str(content).strip():
-                display_name = name if name else "Developer"
+                display_name = name if name else "Build"
                 print_agent_message(display_name, str(content))
 
 
@@ -405,19 +444,13 @@ def handle_slash_command(raw: str, session: RuntimeSessionStore) -> bool:
         return True
 
     if cmd == "/init":
-        agents_path = find_project_root() / "AGENTS.md"
-        if agents_path.exists():
-            print_status("AGENTS.md already exists", "info")
-        else:
-            agents_path.write_text(
-                "# AGENTS\n\n"
-                "Project-level instructions for Mirage agents.\n\n"
-                "- Add coding standards\n"
-                "- Add review requirements\n"
-                "- Add domain constraints\n",
-                encoding="utf-8",
-            )
+        agents_path, status = _init_agents_md(find_project_root())
+        if status == "created":
             print_status(f"✓ created {agents_path}", "success")
+        elif status == "updated":
+            print_status(f"✓ updated {agents_path}", "success")
+        else:
+            print_status("AGENTS.md already configured", "info")
         return True
 
     if cmd == "/clear":
@@ -847,9 +880,7 @@ def run_agent(
     session: RuntimeSessionStore | None = None,
     execution_policy: dict[str, str] | None = None,
 ) -> None:
-    """Stream the multi-agent workflow autonomously. Agents decide every
-    handoff themselves — there is no human-in-the-loop gate.
-    """
+    """Stream the runtime workflow autonomously."""
     config = {"configurable": {"thread_id": thread_id}, "recursion_limit": RECURSION_LIMIT}
     previous_policy = get_policy()
     if execution_policy is not None:
@@ -871,14 +902,7 @@ def run_agent(
         ):
             if mode == "updates" and isinstance(event, dict):
                 for node_name, node_state in event.items():
-                    if node_name == "supervisor":
-                        proposed = (
-                            node_state.get("next", "UNKNOWN")
-                            if isinstance(node_state, dict)
-                            else "UNKNOWN"
-                        )
-                        print_supervisor_routing(proposed)
-                    elif isinstance(node_state, dict):
+                    if isinstance(node_state, dict):
                         msgs = node_state.get("messages")
                         if isinstance(msgs, list) and msgs:
                             # Some LangGraph versions surface tool-call details only

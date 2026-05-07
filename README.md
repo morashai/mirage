@@ -5,17 +5,15 @@ Mirage is an open-source coding agent CLI, similar in spirit to Claude-style ter
 ![Mirage CLI preview](./image.png)
 
 
-It runs a 3-agent product team:
-- `ProjectManager` (planning, read-only)
-- `UXUIDesigner` (UI/UX specification, read-only)
-- `Developer` (the only code-writing agent)
+It runs a single primary runtime agent:
+- `Build` (implementation and execution)
 
 
 ---
 
 ## Features
 
-- Multi-agent orchestration via LangGraph supervisor routing
+- Single-agent LangGraph runtime loop
 - Interactive chat mode with a bordered prompt input box
 - Non-interactive single-task mode
 - Thread-aware **persisted** memory (SQLite checkpointer under `~/.mirage/sessions.db`)
@@ -57,12 +55,12 @@ Mirage uses a production-oriented state pattern inspired by Claude CLI:
 - Runtime chat session state is centralized in a typed store (`RuntimeSessionStore`) with immutable updates, invariant validation, and a single derive/on-change chokepoint.
 - Provider/model changes automatically rebuild the compiled graph in one place (instead of scattered command handlers).
 - Session identity/provider/model updates are synchronized to the persistent session index through a single state-change hook.
-- Supervisor routing guardrails are implemented as pure helpers (`src/agents/routing.py`) for deterministic behavior and easier testing.
+- Runtime flow is a direct `START -> Build -> END` LangGraph topology.
 
 Compatibility guarantees:
 - Existing `~/.mirage/sessions.json` metadata remains valid.
 - Existing `~/.mirage/sessions.db` checkpoint threads remain valid.
-- LangGraph state contract remains stable (`messages`, `next`).
+- LangGraph state contract remains stable (`messages`).
 
 ---
 
@@ -70,14 +68,14 @@ Compatibility guarantees:
 
 Mirage now ships a canonical, deduplicated core tool registry under `src/tools/`.
 
-- **Read-only tools** (ProjectManager + UXUIDesigner):
+- **Read-only tools** (available to Build):
   - filesystem: `list_directory`, `read_file`
   - search: `glob_search`, `ripgrep_search`
   - git: `git_status`, `git_diff`, `git_log`, `git_current_branch`
   - web: `web_fetch`, `web_search`
   - notebook: `read_notebook`
   - mcp descriptors: `list_mcp_servers`, `list_mcp_tools`, `read_mcp_tool_schema`
-- **Developer-only extras**:
+- **Build agent extras**:
   - filesystem write: `write_file`, `edit_file`
   - execution: `run_shell_command`
   - notebook edit: `edit_notebook_cell`
@@ -264,7 +262,7 @@ mirage run "build a hello world FastAPI app"
 
 Options:
 
-- `--thread-id` (default: `multi-agent-session-1`)
+- `--thread-id` (default: `mirage-session-1`)
 - `--model`, `-m`
 - `--provider`, `-p`
 
@@ -567,7 +565,7 @@ python scratch_test.py
 The smoke suite validates:
 - prompt input behavior (`Enter`, `Esc+Enter`, `Ctrl+D`)
 - slash command handling
-- graph topology (`ProjectManager`, `UXUIDesigner`, `Developer`, `supervisor`)
+- graph topology (`Build`)
 - no executor / no HITL artifacts
 - autonomous handoff flow
 

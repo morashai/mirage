@@ -8,7 +8,6 @@ the cooler HUD palette of an earlier iteration.
 
 Typography conventions:
 - ``ACCENT`` is the brand color (frame borders, prompts, banner mark).
-- ``SUPERVISOR_COLOR`` is radar / AWACS green.
 - Per-agent colors map each role to a distinct cue so an operator can
   identify the speaker at a glance.
 
@@ -49,37 +48,22 @@ WARN_AMBER = "#d6a96c"         # caution amber
 DANGER_RED = "#d96b6b"         # bright warning red (RWR / threat)
 
 # ---------------------------------------------------------------------------
-# Per-agent colors — one cue per role
+# Per-agent colors — single primary agent runtime
 # ---------------------------------------------------------------------------
-SUPERVISOR_COLOR = JORDAN_GREEN          # AWACS scope / flight lead
-PROJECT_MANAGER_COLOR = JORDAN_WHITE     # ops board / mission planner
-DESIGNER_COLOR = DESERT_TAN              # RJAF camo / recce
 DEVELOPER_COLOR = "#d6a35b"              # afterburner amber / strike pilot
 
 AGENT_COLORS: dict[str, str] = {
-    "Developer": DEVELOPER_COLOR,
-    "Supervisor": SUPERVISOR_COLOR,
-    "ProjectManager": PROJECT_MANAGER_COLOR,
-    "UXUIDesigner": DESIGNER_COLOR,
+    "Build": DEVELOPER_COLOR,
 }
 
 AGENT_DISPLAY_NAMES: dict[str, str] = {
-    "Developer": "Developer",
-    "Supervisor": "Supervisor",
-    "ProjectManager": "Project Manager",
-    "UXUIDesigner": "UX/UI Designer",
+    "Build": "Build",
 }
 
 # Aviation glyphs:
-#   ◎  AWACS scope / RJAF roundel — flight lead
-#   ▣  command-grid / OPS center  — mission planner
-#   ◈  recce diamond              — designer / scout
-#   ▲  delta wing                 — strike pilot (the Mirage itself)
+#   ▲  delta wing                 — primary runtime agent
 AGENT_GLYPHS: dict[str, str] = {
-    "Supervisor":     "◎",
-    "ProjectManager": "▣",
-    "UXUIDesigner":   "◈",
-    "Developer":      "▲",
+    "Build":          "▲",
 }
 
 # Single shared Rich console used everywhere we render to the terminal.
