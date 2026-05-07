@@ -40,6 +40,7 @@ from .render import (
 )
 from .session import (
     create_runtime_session_store,
+    enhance_user_prompt,
     ensure_api_key_or_prompt,
     handle_slash_command,
     run_agent,
@@ -447,9 +448,16 @@ def _start_chat(
         try:
             print_status("[WORKING] Mirage agent is running...", "working")
             current_state = session.get_state()
+            enhanced_input = enhance_user_prompt(
+                user_input,
+                provider=current_state.provider,
+                model=current_state.model,
+            )
+            if enhanced_input.strip() != user_input.strip():
+                print_status("[prompt] enhanced user prompt", "info")
             run_agent(
                 current_state.graph,
-                user_input,
+                enhanced_input,
                 current_state.thread_id,
                 session=session,
             )
@@ -560,6 +568,7 @@ def run(
         raise typer.Exit(code=1)
     if attach:
         print_status(f"attach requested: {attach} (local fallback mode)", "warn")
+    task = enhance_user_prompt(task, provider=spec.provider, model=spec.model)
     execution_policy = policy_for_mode(BUILD_MODE)
     if agent:
         desired = agent.strip().lower()

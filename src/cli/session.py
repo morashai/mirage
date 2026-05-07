@@ -669,6 +669,27 @@ def open_model_configuration(session: RuntimeSessionStore, arg: str | None = Non
     print_status(f"✓ model · {new_state.provider}:{new_state.model}", "success")
 
 
+def enhance_user_prompt(raw_prompt: str, *, provider: str, model: str) -> str:
+    """Rewrite user input into a clearer execution-ready prompt."""
+    text = raw_prompt.strip()
+    if not text:
+        return raw_prompt
+    try:
+        enhanced = _llm_markdown_draft(
+            provider=provider,
+            model=model,
+            prompt=(
+                "Rewrite the user's request into a concise, execution-ready prompt for a coding agent.\n"
+                "Preserve intent and constraints. Do not add unrelated scope.\n"
+                "Output only the rewritten prompt text.\n\n"
+                f"User request:\n{text}\n"
+            ),
+        ).strip()
+        return enhanced or raw_prompt
+    except Exception:  # noqa: BLE001
+        return raw_prompt
+
+
 def handle_slash_command(raw: str, session: RuntimeSessionStore) -> bool:
     """Returns True if a slash command was handled (and should not be sent to the agent)."""
     if not raw.startswith("/"):
