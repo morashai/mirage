@@ -25,11 +25,10 @@ from .render import (
     print_welcome,
 )
 from .session import (
+    create_runtime_session_store,
     ensure_api_key_or_prompt,
     handle_slash_command,
-    refresh_session_graph,
     run_agent,
-    sync_session_index,
 )
 
 
@@ -221,30 +220,28 @@ def _start_chat(
         provider=provider,
     )
 
-    store = SessionStore()
-    session = {
-        "thread_id": tid,
-        "provider": prov,
-        "model": mdl,
-        "session_name": tid,
-        "session_store": store,
-        "cfg": load_config(),
-    }
-    refresh_session_graph(session)
-    sync_session_index(session)
+    session = create_runtime_session_store(
+        thread_id=tid,
+        provider=prov,
+        model=mdl,
+        session_store=SessionStore(),
+        session_name=tid,
+    )
 
     if not ensure_api_key_or_prompt(session):
         print_status("cannot chat without API credentials", "error")
         raise typer.Exit(code=1)
 
-    print_welcome(session["thread_id"], session["model"], provider=session["provider"])
+    state = session.get_state()
+    print_welcome(state.thread_id, state.model, provider=state.provider)
 
     while True:
+        state = session.get_state()
         try:
             user_input = _prompt_input_box(
-                session["thread_id"],
-                session["model"],
-                provider=session["provider"],
+                state.thread_id,
+                state.model,
+                provider=state.provider,
             )
         except KeyboardInterrupt:
             print_status("goodbye", "info")
@@ -262,7 +259,8 @@ def _start_chat(
             continue
 
         try:
-            run_agent(session["graph"], user_input, session["thread_id"], session=session)
+            state = session.get_state()
+            run_agent(state.graph, user_input, state.thread_id, session=session)
         except KeyboardInterrupt:
             print_status("interrupted", "warn")
         except Exception as e:  # noqa: BLE001 — surface every error to the user

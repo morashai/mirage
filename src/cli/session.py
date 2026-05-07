@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import os
 import sys
+from dataclasses import replace
 
 from langchain_core.messages import HumanMessage
 from rich.text import Text
@@ -15,6 +16,7 @@ from ..llm.spec import LLMSpec
 from ..sessions.store import SessionStore, new_thread_id, resolve_session_selector
 from ..theme import ACCENT, console
 from .model_form import run_model_form
+from .runtime_state import RuntimeSessionState, RuntimeSessionStore
 from .render import (
     print_agent_message,
     print_config_form,
@@ -27,53 +29,116 @@ from .render import (
 )
 
 
-def refresh_session_graph(session: dict) -> None:
-    """Rebuild the compiled graph from current provider/model + disk config."""
+def _build_session_graph(provider: str, model: str):
     cfg = load_config()
-    session["cfg"] = cfg
-    spec = LLMSpec(provider=session["provider"], model=session["model"])
-    session["graph"] = build_graph(llm_spec=spec, cfg=cfg)
+    spec = LLMSpec(provider=provider, model=model)
+    graph = build_graph(llm_spec=spec, cfg=cfg)
+    return cfg, graph
 
 
-def sync_session_index(session: dict) -> None:
-    store: SessionStore = session["session_store"]
-    store.ensure_session(
-        session["thread_id"],
-        name=session.get("session_name") or session["thread_id"],
-        provider=session["provider"],
-        model=session["model"],
+def _derive_runtime_state(
+    previous: RuntimeSessionState,
+    candidate: RuntimeSessionState,
+) -> RuntimeSessionState:
+    needs_graph_refresh = (
+        previous.provider != candidate.provider
+        or previous.model != candidate.model
+        or candidate.graph is None
+    )
+    if not needs_graph_refresh:
+        return candidate
+    cfg, graph = _build_session_graph(candidate.provider, candidate.model)
+    return replace(candidate, cfg=cfg, graph=graph)
+
+
+def _on_change_runtime_state(new_state: RuntimeSessionState, old_state: RuntimeSessionState) -> None:
+    if (
+        new_state.thread_id != old_state.thread_id
+        or new_state.session_name != old_state.session_name
+        or new_state.provider != old_state.provider
+        or new_state.model != old_state.model
+    ):
+        new_state.session_store.ensure_session(
+            new_state.thread_id,
+            name=new_state.session_name or new_state.thread_id,
+            provider=new_state.provider,
+            model=new_state.model,
+        )
+
+
+def create_runtime_session_store(
+    *,
+    thread_id: str,
+    provider: str,
+    model: str,
+    session_store: SessionStore,
+    session_name: str | None = None,
+) -> RuntimeSessionStore:
+    cfg, graph = _build_session_graph(provider, model)
+    initial = RuntimeSessionState(
+        thread_id=thread_id,
+        provider=provider,
+        model=model,
+        session_name=(session_name or thread_id).strip() or thread_id,
+        session_store=session_store,
+        cfg=cfg,
+        graph=graph,
+    )
+    return RuntimeSessionStore(
+        initial_state=initial,
+        derive_state=_derive_runtime_state,
+        on_change=_on_change_runtime_state,
     )
 
 
-def ensure_api_key_or_prompt(session: dict) -> bool:
+def refresh_session_graph(session: RuntimeSessionStore) -> None:
+    """Rebuild the compiled graph from current provider/model + disk config."""
+    state = session.get_state()
+    session.set_state(lambda prev: replace(prev, cfg=state.cfg, graph=None))
+
+
+def sync_session_index(session: RuntimeSessionStore) -> None:
+    state = session.get_state()
+    state.session_store.ensure_session(
+        state.thread_id,
+        name=state.session_name or state.thread_id,
+        provider=state.provider,
+        model=state.model,
+    )
+
+
+def ensure_api_key_or_prompt(session: RuntimeSessionStore) -> bool:
     """If no API key is available for the active provider, open the model form."""
+    state = session.get_state()
     cfg = load_config()
-    session["cfg"] = cfg
-    if resolve_api_key(cfg, session["provider"]):
+    if resolve_api_key(cfg, state.provider):
         return True
-    print_status(f"no API key for provider '{session['provider']}' — configure now", "warn")
+    print_status(f"no API key for provider '{state.provider}' — configure now", "warn")
     res = run_model_form(
         cfg,
-        initial_provider=session["provider"],
-        initial_model=session["model"],
+        initial_provider=state.provider,
+        initial_model=state.model,
     )
     if not res:
         return False
-    session["provider"] = str(res["provider"])
-    session["model"] = str(res["model"])
-    refresh_session_graph(session)
-    sync_session_index(session)
+    session.set_state(
+        lambda prev: replace(
+            prev,
+            provider=str(res["provider"]),
+            model=str(res["model"]),
+        )
+    )
     print_status("✓ credentials saved", "success")
     return True
 
 
-def open_model_configuration(session: dict, arg: str | None = None) -> None:
+def open_model_configuration(session: RuntimeSessionStore, arg: str | None = None) -> None:
     """Open the interactive configuration form (optional ``provider:model`` arg)."""
+    state = session.get_state()
     cfg = load_config()
-    session["cfg"] = cfg
     parsed_prov, parsed_model = parse_model_arg(arg)
-    initial_provider = parsed_prov or session["provider"]
-    initial_model = parsed_model or session["model"]
+    initial_provider = parsed_prov or state.provider
+    initial_model = parsed_model or state.model
     res = run_model_form(
         cfg,
         initial_provider=initial_provider,
@@ -82,18 +147,23 @@ def open_model_configuration(session: dict, arg: str | None = None) -> None:
     if not res:
         print_status("cancelled", "info")
         return
-    session["provider"] = str(res["provider"])
-    session["model"] = str(res["model"])
-    refresh_session_graph(session)
-    sync_session_index(session)
-    print_status(f"✓ model · {session['provider']}:{session['model']}", "success")
+    session.set_state(
+        lambda prev: replace(
+            prev,
+            provider=str(res["provider"]),
+            model=str(res["model"]),
+        )
+    )
+    new_state = session.get_state()
+    print_status(f"✓ model · {new_state.provider}:{new_state.model}", "success")
 
 
-def handle_slash_command(raw: str, session: dict) -> bool:
+def handle_slash_command(raw: str, session: RuntimeSessionStore) -> bool:
     """Returns True if a slash command was handled (and should not be sent to the agent)."""
     if not raw.startswith("/"):
         return False
 
+    state = session.get_state()
     parts = raw.strip().split(maxsplit=1)
     cmd = parts[0].lower()
     arg = parts[1].strip() if len(parts) > 1 else None
@@ -109,31 +179,40 @@ def handle_slash_command(raw: str, session: dict) -> bool:
     if cmd == "/clear":
         os.system("cls" if os.name == "nt" else "clear")
         print_welcome(
-            session["thread_id"],
-            session["model"],
-            provider=session["provider"],
+            state.thread_id,
+            state.model,
+            provider=state.provider,
         )
         return True
 
-    store: SessionStore = session["session_store"]
+    store = state.session_store
 
     if cmd in ("/reset", "/new"):
         name = arg.strip() if arg else ""
-        session["thread_id"] = new_thread_id()
-        session["session_name"] = name or session["thread_id"]
-        refresh_session_graph(session)
-        sync_session_index(session)
-        print_status(f"✓ new session: {session['thread_id']}", "success")
+        new_tid = new_thread_id()
+        session.set_state(
+            lambda prev: replace(
+                prev,
+                thread_id=new_tid,
+                session_name=name or new_tid,
+            )
+        )
+        print_status(f"✓ new session: {new_tid}", "success")
         return True
 
     if cmd == "/thread":
         if arg:
-            session["thread_id"] = arg.strip()
-            refresh_session_graph(session)
-            sync_session_index(session)
-            print_status(f"✓ switched thread: {session['thread_id']}", "success")
+            new_tid = arg.strip()
+            session.set_state(
+                lambda prev: replace(
+                    prev,
+                    thread_id=new_tid,
+                    session_name=new_tid,
+                )
+            )
+            print_status(f"✓ switched thread: {new_tid}", "success")
         else:
-            print_status(f"current thread: {session['thread_id']}", "info")
+            print_status(f"current thread: {state.thread_id}", "info")
         return True
 
     if cmd == "/model":
@@ -141,35 +220,37 @@ def handle_slash_command(raw: str, session: dict) -> bool:
         return True
 
     if cmd == "/provider":
-        prov = arg.strip().lower() if arg else session["provider"]
+        prov = arg.strip().lower() if arg else state.provider
         if prov not in PROVIDERS:
             print_status(f"unknown provider: {prov}", "error")
             return True
         cfg = load_config()
-        session["cfg"] = cfg
         res = run_model_form(
             cfg,
             initial_provider=prov,
-            initial_model=session["model"],
+            initial_model=state.model,
         )
         if not res:
             print_status("cancelled", "info")
             return True
-        session["provider"] = str(res["provider"])
-        session["model"] = str(res["model"])
-        refresh_session_graph(session)
-        sync_session_index(session)
-        print_status(f"✓ model · {session['provider']}:{session['model']}", "success")
+        session.set_state(
+            lambda prev: replace(
+                prev,
+                provider=str(res["provider"]),
+                model=str(res["model"]),
+            )
+        )
+        new_state = session.get_state()
+        print_status(f"✓ model · {new_state.provider}:{new_state.model}", "success")
         return True
 
     if cmd == "/config":
         cfg = load_config()
-        session["cfg"] = cfg
         sub = (arg or "").strip().lower()
         if sub == "edit":
-            open_model_configuration(session, f"{session['provider']}:{session['model']}")
+            open_model_configuration(session, f"{state.provider}:{state.model}")
         else:
-            print_config_form(cfg, active_provider=session["provider"])
+            print_config_form(cfg, active_provider=state.provider)
         return True
 
     if cmd == "/models":
@@ -182,7 +263,7 @@ def handle_slash_command(raw: str, session: dict) -> bool:
 
     if cmd == "/sessions":
         rows = store.list_sessions()
-        print_sessions_table(rows, active_id=session["thread_id"])
+        print_sessions_table(rows, active_id=state.thread_id)
         return True
 
     if cmd == "/session":
@@ -194,12 +275,15 @@ def handle_slash_command(raw: str, session: dict) -> bool:
         if not hit:
             print_status(f"session not found: {arg}", "error")
             return True
-        session["thread_id"] = hit.thread_id
-        session["session_name"] = hit.name
-        session["provider"] = hit.provider
-        session["model"] = hit.model
-        refresh_session_graph(session)
-        sync_session_index(session)
+        session.set_state(
+            lambda prev: replace(
+                prev,
+                thread_id=hit.thread_id,
+                session_name=hit.name,
+                provider=hit.provider,
+                model=hit.model,
+            )
+        )
         store.touch(hit.thread_id)
         print_status(f"✓ switched to session {hit.thread_id}", "success")
         return True
@@ -208,9 +292,11 @@ def handle_slash_command(raw: str, session: dict) -> bool:
         if not arg:
             print_status("usage: /rename <name>", "error")
             return True
-        session["session_name"] = arg.strip()
-        store.rename(session["thread_id"], session["session_name"])
-        print_status(f"✓ renamed to {session['session_name']}", "success")
+        new_name = arg.strip()
+        current = session.get_state()
+        session.set_state(lambda prev: replace(prev, session_name=new_name))
+        store.rename(current.thread_id, new_name)
+        print_status(f"✓ renamed to {new_name}", "success")
         return True
 
     if cmd == "/delete":
@@ -225,19 +311,24 @@ def handle_slash_command(raw: str, session: dict) -> bool:
         tid = hit.thread_id
         store.delete(tid)
         print_status(f"✓ deleted session {tid}", "success")
-        if tid == session["thread_id"]:
-            session["thread_id"] = new_thread_id()
-            session["session_name"] = session["thread_id"]
-            refresh_session_graph(session)
-            sync_session_index(session)
-            print_status(f"started fresh thread {session['thread_id']}", "info")
+        if tid == state.thread_id:
+            new_tid = new_thread_id()
+            session.set_state(
+                lambda prev: replace(prev, thread_id=new_tid, session_name=new_tid)
+            )
+            print_status(f"started fresh thread {new_tid}", "info")
         return True
 
     print_status(f"unknown command: {cmd}  (try /help)", "error")
     return True
 
 
-def run_agent(graph, task: str, thread_id: str, session: dict | None = None) -> None:
+def run_agent(
+    graph,
+    task: str,
+    thread_id: str,
+    session: RuntimeSessionStore | None = None,
+) -> None:
     """Stream the multi-agent workflow autonomously. Agents decide every
     handoff themselves — there is no human-in-the-loop gate.
     """
@@ -295,7 +386,7 @@ def run_agent(graph, task: str, thread_id: str, session: dict | None = None) -> 
                         )
                         return
         if session is not None:
-            session["session_store"].touch(thread_id)
+            session.get_state().session_store.touch(thread_id)
     finally:
         if spinner_running:
             spinner.stop()

@@ -29,7 +29,6 @@ warnings.filterwarnings(
     ),
 )
 
-from langchain_core.messages import AIMessage
 from langgraph.graph import END, START, StateGraph
 
 from ..config_store import MirageConfig, load_config, resolve_api_key, resolve_base_url
@@ -39,6 +38,7 @@ from ..tools import DEVELOPER_TOOLS, READ_ONLY_TOOLS
 from .developer import build_developer
 from .factory import make_node
 from .project_manager import build_project_manager
+from .routing import resolve_next_route
 from .state import AgentState, MEMBERS
 from .supervisor import build_supervisor_chain
 from .ux_ui_designer import build_ux_ui_designer
@@ -48,10 +48,6 @@ if TYPE_CHECKING:
 
 _sqlite_checkpointer: Any | None = None
 _sqlite_conn: sqlite3.Connection | None = None
-
-
-def _norm(content: str) -> str:
-    return " ".join((content or "").split()).strip().lower()
 
 
 def _get_checkpointer():
@@ -100,38 +96,7 @@ def _build_agents(llm):
 
     def supervisor_node(state: AgentState):
         result = supervisor_chain.invoke({"messages": state["messages"]})
-        chosen = result.next
-
-        worker_msgs = [
-            msg
-            for msg in state["messages"]
-            if isinstance(msg, AIMessage) and getattr(msg, "name", "") in MEMBERS
-        ]
-
-        # Guardrail: never terminate before any worker has responded.
-        has_worker_reply = bool(worker_msgs)
-        if not has_worker_reply and chosen == "FINISH":
-            chosen = "ProjectManager"
-
-        # Loop guard: repeated two-step ping-pong pattern means no progress.
-        if len(worker_msgs) >= 4:
-            sig = [
-                (m.name, _norm(getattr(m, "content", "") or ""))
-                for m in worker_msgs[-4:]
-            ]
-            if sig[0] == sig[2] and sig[1] == sig[3]:
-                chosen = "FINISH"
-
-        # If the developer has repeated the same response, terminate gracefully.
-        if len(worker_msgs) >= 3:
-            last3 = worker_msgs[-3:]
-            if all(m.name == "Developer" for m in last3):
-                a = _norm(getattr(last3[0], "content", "") or "")
-                b = _norm(getattr(last3[1], "content", "") or "")
-                c = _norm(getattr(last3[2], "content", "") or "")
-                if a and a == b == c:
-                    chosen = "FINISH"
-
+        chosen = resolve_next_route(result.next, state["messages"], MEMBERS)
         return {"next": chosen}
 
     return {

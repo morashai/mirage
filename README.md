@@ -28,6 +28,20 @@ It runs a 3-agent product team:
   - `mirage`
   - `mirage-cli`
 
+## State Architecture
+
+Mirage uses a production-oriented state pattern inspired by Claude CLI:
+
+- Runtime chat session state is centralized in a typed store (`RuntimeSessionStore`) with immutable updates, invariant validation, and a single derive/on-change chokepoint.
+- Provider/model changes automatically rebuild the compiled graph in one place (instead of scattered command handlers).
+- Session identity/provider/model updates are synchronized to the persistent session index through a single state-change hook.
+- Supervisor routing guardrails are implemented as pure helpers (`src/agents/routing.py`) for deterministic behavior and easier testing.
+
+Compatibility guarantees:
+- Existing `~/.mirage/sessions.json` metadata remains valid.
+- Existing `~/.mirage/sessions.db` checkpoint threads remain valid.
+- LangGraph state contract remains stable (`messages`, `next`).
+
 ---
 
 ## Tool catalog (core)
